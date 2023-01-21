@@ -71,8 +71,6 @@ class AttnModule(torch.nn.Module):
         self.sketch_conv = nn.Conv1d(base_dim, base_dim, 1)
         self.sketch_scale = 1.0
     
-        # torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
-        # torch.nn.init.zeros_(self.lora_up.weight)
         outer = self
         def forward(self, hidden_states, *args, **kwargs):
             return outer.forward(hidden_states, org_module=self, **kwargs)
@@ -124,7 +122,7 @@ class AttnModule(torch.nn.Module):
             norm_hidden_states = inner.sketch_norm(torch.cat([hidden_states, inner.res_sample], dim=2)) 
             sketch_attn_output = inner.sketch_attn(norm_hidden_states, attention_mask=attention_mask, **cross_attention_kwargs)
             
-            # 1.5. Injected Self-Attention
+            # 1.5. Injected CrossAttention
             # norm_hidden_states = inner.sketch_norm(hidden_states) 
             # sketch_attn_output = inner.sketch_attn(norm_hidden_states, encoder_hidden_states=inner.res_sample, **cross_attention_kwargs)
             

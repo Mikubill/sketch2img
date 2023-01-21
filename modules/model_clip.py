@@ -62,8 +62,6 @@ class AttnModule(torch.nn.Module):
         self.sketch_conv = nn.Conv1d(base_dim, base_dim, 1)
         self.sketch_scale = 1.0
     
-        # torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
-        # torch.nn.init.zeros_(self.lora_up.weight)
         outer = self
         def forward(self, hidden_states, *args, **kwargs):
             return outer.forward(hidden_states, org_module=self, **kwargs)
