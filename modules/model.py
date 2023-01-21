@@ -124,6 +124,10 @@ class AttnModule(torch.nn.Module):
             norm_hidden_states = inner.sketch_norm(torch.cat([hidden_states, inner.res_sample], dim=2)) 
             sketch_attn_output = inner.sketch_attn(norm_hidden_states, attention_mask=attention_mask, **cross_attention_kwargs)
             
+            # 1.5. Injected Self-Attention
+            # norm_hidden_states = inner.sketch_norm(hidden_states) 
+            # sketch_attn_output = inner.sketch_attn(norm_hidden_states, encoder_hidden_states=inner.res_sample, **cross_attention_kwargs)
+            
             # TS(w): select non-sketch token only
             sketch_attn_output = sketch_attn_output[:, :attn_output.shape[1], :attn_output.shape[2]].permute(0, 2, 1)
             sketch_attn_output = inner.sketch_scale * inner.sketch_conv(sketch_attn_output)
