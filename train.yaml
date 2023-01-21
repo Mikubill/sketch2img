@@ -1,0 +1,58 @@
+name: test-run
+model_path: "/root/workspace/storage/models/orangemix"
+train_epochs: 30
+batch_size: 3
+resolution: 512
+seed: 1138
+
+arb:
+  enabled: true
+  debug: false
+  base_res: [512, 512]
+  max_size: [768, 512]
+  divisible: 64
+  max_ar_error: 4
+  min_dim: 256
+  dim_limit: 1024
+
+dataset:
+  img_path: 
+    - "/root/workspace/nahida"
+  center_crop: false
+  ucg: 0.1
+  debug_arb: false
+  num_workers: 3
+  process_tags: true
+  cache_latents: false
+  important_tags: []
+  allow_duplicates: false
+
+optimizer:
+  name: bitsandbytes.optim.AdamW8bit
+  params:
+    lr: 2e-4
+    weight_decay: 1e-2
+    eps: 1e-8
+
+monitor:
+  wandb_id: ""
+  huggingface_repo: ""
+  huggingface_token: ""
+
+sampling:
+  enabled: false
+  use_wandb: true
+  every_n_steps: -1
+  every_n_epochs: 1
+  save_dir: "samples"
+  seed: 1139
+  height: 512
+  width: 512
+  steps: 20
+  cfg_scale: 9
+  negative_prompts: 
+    - "lowres, bad anatomy, text, error, extra digit, cropped"
+    - "lowres, low quality"
+  prompts: 
+    - "a girl running fast on the country lane"
+    - "a girl in black serafuku standing in a field. Tags: solo, food, fruit, lemon, masterpiece"
