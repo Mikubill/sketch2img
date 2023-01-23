@@ -5,7 +5,7 @@ Sketch-to-Image Generation without retraining diffusion models.
 Currently supported method: 
 
 * paint with words and sketch (ediff-i)
-* inject with additional pretrained self-attn layer or cross-attn layer (gligen)
+* inject with additional pretrained self-attn layer or cross-attn layer (gligen?)
 
 ## paint-with-words
 

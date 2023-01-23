@@ -103,7 +103,7 @@ def inference(
         gsimg = Image.fromarray(spimg)
         tensor_img = torch.tile(transforms(gsimg), (3, 1, 1)).unsqueeze(0)
         stacked_img = (
-            torch.stack([tensor_img, torch.zeros_like(tensor_img)])
+            torch.stack([torch.zeros_like(tensor_img), tensor_img])
             .squeeze(1)
             .to(torch.device("cuda"), dtype=vae.dtype)
         )  # for uncond

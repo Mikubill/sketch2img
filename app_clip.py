@@ -104,7 +104,7 @@ def inference(
         sketchs = sketch_processor(images=[img for img in tensor_img], return_tensors="pt", padding=True).pixel_values
         sketch_hidden_state = sketch_encoder(sketchs.to(sketch_encoder.device, dtype=sketch_encoder.dtype), output_hidden_states=True).last_hidden_state   
         
-        sat_model.set_state(torch.stack([sketch_hidden_state, sketch_hidden_state]).squeeze(1))
+        sat_model.set_state(torch.stack([torch.zeros_like(sketch_hidden_state), sketch_hidden_state]).squeeze(1))
         sat_model.set_scale(strength)
 
     result = pipe(
