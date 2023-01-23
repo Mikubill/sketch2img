@@ -4,7 +4,7 @@ import gradio as gr
 import torch
 
 from gradio import inputs
-from modules.model import SatMixin
+from modules.model_unet import SatMixin
 from PIL import Image
 from torchvision import transforms
 from diffusers import AutoencoderKL, DPMSolverMultistepScheduler
@@ -99,10 +99,11 @@ def inference(
     global sat_model
 
     if spimg is not None:
+        print(spimg)
         gsimg = Image.fromarray(spimg)
         tensor_img = torch.tile(transforms(gsimg), (3, 1, 1)).unsqueeze(0)
         stacked_img = (
-            torch.stack([tensor_img, tensor_img])
+            torch.stack([tensor_img, torch.zeros_like(tensor_img)])
             .squeeze(1)
             .to(torch.device("cuda"), dtype=vae.dtype)
         )  # for uncond
@@ -199,7 +200,7 @@ with gr.Blocks(css=css) as demo:
 
             with gr.Tab("SketchPad"):
                 with gr.Group():
-                    sp = gr.Sketchpad(shape=(512, 512))
+                    sp = gr.Sketchpad(shape=(512, 512), tool="sketch")
 
                     strength = gr.Slider(
                         label="Transformation strength",

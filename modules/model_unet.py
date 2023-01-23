@@ -52,7 +52,7 @@ class AttnModule(torch.nn.Module):
         
         # extract params from inner attn1
         base_dim = attn1.to_q.in_features
-        dim = base_dim * 2
+        dim = base_dim 
         heads = attn1.heads
         dim_head = attn1.to_q.out_features // heads
         attention_bias = hasattr(attn1, "bias") and attn1.bias != None
@@ -119,12 +119,12 @@ class AttnModule(torch.nn.Module):
         
         if hasattr(inner, "res_sample") and  inner.res_sample is not None:
             # 1.5. Injected Self-Attention
-            norm_hidden_states = inner.sketch_norm(torch.cat([hidden_states, inner.res_sample], dim=2)) 
-            sketch_attn_output = inner.sketch_attn(norm_hidden_states, attention_mask=attention_mask, **cross_attention_kwargs)
+            # norm_hidden_states = inner.sketch_norm(torch.cat([hidden_states, inner.res_sample], dim=2)) 
+            # sketch_attn_output = inner.sketch_attn(norm_hidden_states, attention_mask=attention_mask, **cross_attention_kwargs)
             
             # 1.5. Injected CrossAttention
-            # norm_hidden_states = inner.sketch_norm(hidden_states) 
-            # sketch_attn_output = inner.sketch_attn(norm_hidden_states, encoder_hidden_states=inner.res_sample, **cross_attention_kwargs)
+            norm_hidden_states = inner.sketch_norm(hidden_states) 
+            sketch_attn_output = inner.sketch_attn(norm_hidden_states, encoder_hidden_states=inner.res_sample, **cross_attention_kwargs)
             
             # TS(w): select non-sketch token only
             sketch_attn_output = sketch_attn_output[:, :attn_output.shape[1], :attn_output.shape[2]].permute(0, 2, 1)

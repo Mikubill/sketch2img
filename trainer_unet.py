@@ -13,7 +13,7 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from anime2sketch.model import create_model
 from modules.dataset import ImageStore
-from modules.model import SatMixin
+from modules.model_unet import SatMixin
 from modules.unet import SketchEncoder
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -135,7 +135,7 @@ def train():
     
     # lr schedulerを用意する
     lr_scheduler = diffusers.optimization.get_scheduler(
-        "cosine_with_restarts",
+        "constant_with_warmup",
         optimizer,
         num_warmup_steps=150,
         num_training_steps=max_train_steps,
@@ -146,11 +146,11 @@ def train():
     )
 
 
-    unet.to(accelerator.device)
-    text_encoder.to(accelerator.device)
-    vae.to(accelerator.device)
-    sketch_generator.to(accelerator.device)
-    sat_model.to(accelerator.device)
+    unet.to(accelerator.device, dtype=torch.float16)
+    text_encoder.to(accelerator.device, dtype=torch.float16)
+    vae.to(accelerator.device, dtype=torch.float32)
+    sketch_generator.to(accelerator.device, dtype=torch.float32)
+    sat_model.to(accelerator.device, dtype=torch.float32)
     
     unet.eval()
     vae.eval()

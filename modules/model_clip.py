@@ -110,14 +110,14 @@ class AttnModule(torch.nn.Module):
         
         if hasattr(inner, "sketch_state") and  inner.sketch_state is not None:
             # 1.5. Injected Self-Attention
-            # sketch_state = inner.sketch_proj(inner.sketch_state)
-            # norm_hidden_states = inner.sketch_norm(torch.cat([hidden_states, sketch_state], dim=1)) 
-            # sketch_attn_output = inner.sketch_attn(norm_hidden_states, attention_mask=attention_mask, **cross_attention_kwargs)
+            sketch_state = inner.sketch_proj(inner.sketch_state)
+            norm_hidden_states = inner.sketch_norm(torch.cat([hidden_states, sketch_state], dim=1)) 
+            sketch_attn_output = inner.sketch_attn(norm_hidden_states, attention_mask=attention_mask, **cross_attention_kwargs)
             
             # 1.6. Injected CrossAttention
-            sketch_state = inner.sketch_proj(inner.sketch_state)
-            norm_hidden_states = inner.sketch_norm(hidden_states) 
-            sketch_attn_output = inner.sketch_attn(norm_hidden_states, encoder_hidden_states=sketch_state, **cross_attention_kwargs)
+            # sketch_state = inner.sketch_proj(inner.sketch_state)
+            # norm_hidden_states = inner.sketch_norm(hidden_states) 
+            # sketch_attn_output = inner.sketch_attn(norm_hidden_states, encoder_hidden_states=sketch_state, **cross_attention_kwargs)
             
             # TS(w): select non-sketch token only
             sketch_attn_output = sketch_attn_output[:, :attn_output.shape[1], :attn_output.shape[2]].permute(0, 2, 1)
