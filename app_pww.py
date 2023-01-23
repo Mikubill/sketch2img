@@ -8,8 +8,11 @@ from diffusers import (
     AutoencoderKL,
     DPMSolverMultistepScheduler,
     StableDiffusionPipeline,
+    StableDiffusionImg2ImgPipeline,
 )
 from modules.model_pww import CrossAttnProcessor, hook_unet, set_state
+from torchvision import transforms
+from PIL import Image
 
 start_time = time.time()
 scheduler = DPMSolverMultistepScheduler(
@@ -18,14 +21,12 @@ scheduler = DPMSolverMultistepScheduler(
     beta_schedule="scaled_linear",
     num_train_timesteps=1000,
     trained_betas=None,
-    predict_epsilon=True,
+    prediction_type="epsilon",
     thresholding=False,
     algorithm_type="dpmsolver++",
     solver_type="midpoint",
     lower_order_final=True,
 )
-
-last_mode = "txt2img"
 
 vae = AutoencoderKL.from_pretrained(
     "runwayml/stable-diffusion-v1-5", subfolder="vae", torch_dtype=torch.float16
@@ -36,13 +37,23 @@ pipe_t2i = StableDiffusionPipeline.from_pretrained(
     torch_dtype=torch.float16,
     scheduler=scheduler,
 )
+
+pipe_i2i = StableDiffusionImg2ImgPipeline.from_pretrained(
+    "/root/workspace/storage/models/orangemix",
+    vae=vae,
+    unet=pipe_t2i.unet,
+    torch_dtype=torch.float16,
+    scheduler=scheduler,
+)
+
 pipe = pipe_t2i
 unet = pipe.unet
 pipe.unet.set_attn_processor(CrossAttnProcessor)
 hook_unet(pipe.tokenizer, pipe.unet)
 
 if torch.cuda.is_available():
-    pipe = pipe.to("cuda")
+    pipe_t2i = pipe_t2i.to("cuda")
+    pipe_i2i = pipe_i2i.to("cuda")
 
 device = "GPU 🔥" if torch.cuda.is_available() else "CPU 🥶"
 
@@ -63,32 +74,32 @@ def inference(
     width=512,
     height=512,
     seed=0,
-    strength=0.5,
     neg_prompt="",
     state=None,
     g_strength=0.4,
+    img_input=None,
+    i2i_scale=0.5,
 ):
-    global current_model
+    global pipe_t2i, pipe_i2i
     generator = torch.Generator("cuda").manual_seed(seed) if seed != 0 else None
-
-    global last_mode
-    global pipe
-    global current_model_path
-    global vae
-    global sketch_encoder
-    global sat_model
-
     set_state(pipe.unet, prompt, state, g_strength, guidance > 1)
-    result = pipe(
-        prompt,
-        negative_prompt=neg_prompt,
-        num_inference_steps=int(steps),
-        guidance_scale=guidance,
-        width=width,
-        height=height,
-        generator=generator,
-    )
-    return result[0][0], None
+
+    config = {
+        "negative_prompt": neg_prompt,
+        "num_inference_steps": int(steps),
+        "guidance_scale": guidance,
+        "generator": generator,
+    }
+
+    if img_input is not None:
+        ratio = min(height / img_input.height, width / img_input.width)
+        img_input = img_input.resize(
+            (int(img_input.width * ratio), int(img_input.height * ratio)), Image.LANCZOS
+        )
+        result = pipe_i2i(prompt, image=img_input, strength=i2i_scale, **config)
+    else:
+        result = pipe_t2i(prompt, width=width, height=height, **config)
+    return result[0][0]
 
 
 color_list = []
@@ -102,7 +113,7 @@ def get_color(n):
 
 def create_mixed_img(current, state, w=512, h=512):
     w, h = int(w), int(h)
-    image_np = np.full([w, h, 4], 255)
+    image_np = np.full([h, w, 4], 255)
     colors = get_color(len(state))
     idx = 0
 
@@ -121,19 +132,12 @@ def create_mixed_img(current, state, w=512, h=512):
 # width.change(apply_new_res, inputs=[width, height, global_stats], outputs=[global_stats, sp, rendered])
 def apply_new_res(w, h, state):
     w, h = int(w), int(h)
-    trs = transforms.Compose(
-        [
-            transforms.ToPILImage(),
-            transforms.Resize(max(w, h)),
-            transforms.CenterCrop((w, h)),
-        ]
-    )
 
     for key, item in state.items():
         if item["map"] is not None:
-            item["map"] = np.array(trs(item["map"]))
+            item["map"] = resize(item["map"], w, h)
 
-    update_img = gr.update(value=create_mixed_img("", state, w, h))
+    update_img = gr.Image.update(value=create_mixed_img("", state, w, h))
     return state, update_img
 
 
@@ -162,6 +166,18 @@ def detect_text(text, state, width, height):
     return new_state, update_sketch, update, update_img
 
 
+def resize(img, w, h):
+    trs = transforms.Compose(
+        [
+            transforms.ToPILImage(),
+            transforms.Resize(min(h, w)),
+            transforms.CenterCrop((h, w)),
+        ]
+    )
+    result = np.array(trs(img), dtype=np.uint8)
+    return result
+
+
 def switch_canvas(entry, state):
     if entry == None:
         return None, 1.0, create_mixed_img("", state)
@@ -172,22 +188,10 @@ def switch_canvas(entry, state):
     )
 
 
-from torchvision import transforms
-
-# sp.edit(apply_canvas, inputs=[radio, sp, global_stats], outputs=[global_stats, rendered])
 def apply_canvas(selected, draw, state, w, h):
     w, h = int(w), int(h)
-    trs = transforms.Compose(
-        [
-            transforms.ToPILImage(),
-            transforms.Resize(max(w, h)),
-            transforms.CenterCrop((w, h)),
-        ]
-    )
-
-    state[selected]["map"] = np.array(trs(draw))
-    ren = create_mixed_img(selected, state, w, h)
-    return state, ren
+    state[selected]["map"] = resize(draw, w, h)
+    return state, gr.Image.update(value=create_mixed_img(selected, state, w, h))
 
 
 def apply_weight(selected, weight, state):
@@ -195,7 +199,11 @@ def apply_weight(selected, weight, state):
     return state
 
 
-# def apply_rgb_image(image):
+# sp2, radio, width, height, global_stats
+def apply_image(image, selected, w, h, strgength, state):
+    if selected is not None:
+        state[selected] = {"map": resize(image, w, h), "weight": strgength}
+    return state, gr.Image.update(value=create_mixed_img(selected, state, w, h))
 
 
 css = """
@@ -203,7 +211,8 @@ css = """
     display:inline-flex;
     align-items:center;
     gap:.8rem;
-    font-size:1.75rem
+    font-size:1.75rem;
+    padding-top:2rem;
 }
 .finetuned-diffusion-div div h1{
     font-weight:900;
@@ -251,62 +260,85 @@ with gr.Blocks(css=css) as demo:
     with gr.Row():
 
         with gr.Column(scale=55):
-            with gr.Group():
 
                 image_out = gr.Image(height=512)
                 # gallery = gr.Gallery(
                 #     label="Generated images", show_label=False, elem_id="gallery"
                 # ).style(grid=[1], height="auto")
 
-                
         with gr.Column(scale=45):
             
-
-            model = gr.Textbox(
-                interactive=False,
-                label="Model",
-                placeholder="Worangemix-Modified",
-            )
-
-            # with gr.Tab("Options"):
-            prompt = gr.Textbox(
-                label="Prompt",
-                show_label=True,
-                max_lines=2,
-                placeholder="Enter prompt.",
-            )
-            neg_prompt = gr.Textbox(
-                label="Negative Prompt",
-                show_label=True,
-                max_lines=2,
-                placeholder="Enter negative prompt.",
-            )
-
-
-            with gr.Group():
-
-                # n_images = gr.Slider(label="Images", value=1, minimum=1, maximum=4, step=1)
-                with gr.Row():
-                    guidance = gr.Slider(label="Guidance scale", value=7.5, maximum=15)
-                    steps = gr.Slider(
-                        label="Steps", value=25, minimum=2, maximum=75, step=1
+                with gr.Group():
+                
+                    model = gr.Textbox(
+                        interactive=False,
+                        label="Model",
+                        placeholder="Worangemix-Modified",
                     )
+                
+                    with gr.Row():
+                        with gr.Column(scale=70):
+                            prompt = gr.Textbox(
+                                    label="Prompt",
+                                    show_label=True,
+                                    max_lines=2,
+                                    placeholder="Enter prompt.",
+                            )
+                            neg_prompt = gr.Textbox(
+                                    label="Negative Prompt",
+                                    show_label=True,
+                                    max_lines=2,
+                                    placeholder="Enter negative prompt.",
+                            )
+                            
+                        generate = gr.Button(value="Generate").style(rounded=(False, True, True, False))
+            
+                        
+                with gr.Tab("Options"):
+                    
+                    with gr.Group():
 
-                with gr.Row():
-                    width = gr.Slider(
-                        label="Width", value=512, minimum=64, maximum=1024, step=8
-                    )
-                    height = gr.Slider(
-                        label="Height", value=512, minimum=64, maximum=1024, step=8
-                    )
+                    # n_images = gr.Slider(label="Images", value=1, minimum=1, maximum=4, step=1)
+                        with gr.Row():
+                            guidance = gr.Slider(label="Guidance scale", value=7.5, maximum=15)
+                            steps = gr.Slider(
+                                label="Steps", value=25, minimum=2, maximum=75, step=1
+                            )
 
-                seed = gr.Slider(
-                    0, 2147483647, label="Seed (0 = random)", value=0, step=1
-                )
+                        with gr.Row():
+                            width = gr.Slider(
+                                label="Width", value=512, minimum=64, maximum=1024, step=8
+                            )
+                            height = gr.Slider(
+                                label="Height", value=512, minimum=64, maximum=1024, step=8
+                            )
 
-            generate = gr.Button(value="Generate")
-            error_output = gr.Markdown()
-        
+                        seed = gr.Slider(
+                            0, 2147483647, label="Seed (0 = random)", value=0, step=1
+                        )
+                        
+
+                with gr.Tab("Image to image"):
+                    with gr.Group():
+                        
+                        inf_image = gr.Image(label="Image", height=256, tool="editor", type="pil")
+                        inf_strength = gr.Slider(label="Transformation strength", minimum=0, maximum=1, step=0.01, value=0.5)
+
+            
+            # error_output = gr.Markdown()
+
+    gr.HTML(
+        f"""
+            <div class="finetuned-diffusion-div">
+              <div>
+                <h1>Sketch Injection</h1>
+              </div>
+              <p>
+                Will use the following formula: w = scale * token_weight_martix * log(1 + sigma) * max(qk).
+              </p>
+            </div>
+        """
+    )
 
     with gr.Row():
 
@@ -316,7 +348,6 @@ with gr.Blocks(css=css) as demo:
                 invert_colors=True,
                 source="canvas",
                 interactive=False,
-                shape=(512, 512),
                 image_mode="RGBA",
             )
 
@@ -331,9 +362,7 @@ with gr.Blocks(css=css) as demo:
                     step=0.01,
                     value=0.6,
                 )
-
-                # g_output = gr.Markdown(r"Scaled additional attn: $w = 0.4 * \log (1 + \sigma) \std (Q^T K)$.")
-
+                
                 text = gr.Textbox(
                     lines=2,
                     interactive=True,
@@ -354,7 +383,7 @@ with gr.Blocks(css=css) as demo:
                 )
 
                 strength = gr.Slider(
-                    label="Transformation strength",
+                    label="Token weight",
                     minimum=0,
                     maximum=2,
                     step=0.01,
@@ -383,17 +412,27 @@ with gr.Blocks(css=css) as demo:
                 )
 
             with gr.Tab("UploadFile"):
-                pass
-                # sp2 = gr.Image(
-                #     image_mode="L",
-                #     source="upload",
-                #     shape=(512, 512),
-                # )
 
-                # radio2 = gr.Textbox(label="Apply to...(Sperate by comma)")
-                # apply_style = gr.Button(value="Submit")
+                sp2 = gr.Image(
+                    image_mode="L",
+                    source="upload",
+                    shape=(512, 512),
+                )
 
-                # apply_style.click(apply_rgb_image, input=[sp2], output=[global_stats, sp, radio, rendered])
+                strength2 = gr.Slider(
+                    label="Token strength",
+                    minimum=0,
+                    maximum=2,
+                    step=0.01,
+                    value=1.0,
+                )
+
+                apply_style = gr.Button(value="Apply")
+                apply_style.click(
+                    apply_image,
+                    inputs=[sp2, radio, width, height, strength2, global_stats],
+                    outputs=[global_stats, rendered],
+                )
 
             width.change(
                 apply_new_res,
@@ -417,12 +456,13 @@ with gr.Blocks(css=css) as demo:
         width,
         height,
         seed,
-        strength,
         neg_prompt,
         global_stats,
         g_strength,
+        inf_image,
+        inf_strength,
     ]
-    outputs = [image_out, error_output]
+    outputs = [image_out]
     prompt.submit(inference, inputs=inputs, outputs=outputs)
     generate.click(inference, inputs=inputs, outputs=outputs)
 

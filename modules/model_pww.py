@@ -146,7 +146,7 @@ def encode_sketchs(tokenizer, state):
             add_special_tokens=False,
         ).input_ids
         dotmap = v["map"] < 255
-        arr = torch.from_numpy(dotmap.astype(int) * v["weight"])
+        arr = torch.from_numpy(dotmap.astype(float) * float(v["weight"]))
         img_state.append((v_input, arr))
 
     return img_state
