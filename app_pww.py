@@ -1,3 +1,5 @@
+import random
+import tempfile
 import time
 import gradio as gr
 import numpy as np
@@ -6,57 +8,117 @@ import torch
 from gradio import inputs
 from diffusers import (
     AutoencoderKL,
-    DPMSolverMultistepScheduler,
-    StableDiffusionPipeline,
-    StableDiffusionImg2ImgPipeline,
+    DDIMScheduler,
+    UNet2DConditionModel,
 )
-from modules.model_pww import CrossAttnProcessor, hook_unet, set_state
+from modules.model_pww import CrossAttnProcessor, StableDiffusionPipeline
 from torchvision import transforms
+from transformers import CLIPTokenizer, CLIPTextModel
 from PIL import Image
+from pathlib import Path
+from safetensors.torch import load_file
+
+models = [
+    ("AbyssOrangeMix_Base", "/root/workspace/storage/models/orangemix"),
+    ("AbyssOrangeMix2", "/root/models/AbyssOrangeMix2"),
+    ("Stable Diffuison 1.5", "/root/models/stable-diffusion-v1-5"),
+    ("AnimeSFW", "/root/workspace/animesfw")
+]
+
+samplers_k_diffusion = [
+    ("Euler a", "sample_euler_ancestral", {}),
+    ("Euler", "sample_euler", {}),
+    ("LMS", "sample_lms", {}),
+    ("Heun", "sample_heun", {}),
+    ("DPM2", "sample_dpm_2", {"discard_next_to_last_sigma": True}),
+    ("DPM2 a", "sample_dpm_2_ancestral", {"discard_next_to_last_sigma": True}),
+    ("DPM++ 2S a", "sample_dpmpp_2s_ancestral", {}),
+    ("DPM++ 2M", "sample_dpmpp_2m", {}),
+    ("DPM++ SDE", "sample_dpmpp_sde", {}),
+    ("DPM fast", "sample_dpm_fast", {}),
+    ("DPM adaptive", "sample_dpm_adaptive", {}),
+    ("LMS Karras", "sample_lms", {"scheduler": "karras"}),
+    (
+        "DPM2 Karras",
+        "sample_dpm_2",
+        {"scheduler": "karras", "discard_next_to_last_sigma": True},
+    ),
+    (
+        "DPM2 a Karras",
+        "sample_dpm_2_ancestral",
+        {"scheduler": "karras", "discard_next_to_last_sigma": True},
+    ),
+    ("DPM++ 2S a Karras", "sample_dpmpp_2s_ancestral", {"scheduler": "karras"}),
+    ("DPM++ 2M Karras", "sample_dpmpp_2m", {"scheduler": "karras"}),
+    ("DPM++ SDE Karras", "sample_dpmpp_sde", {"scheduler": "karras"}),
+]
 
 start_time = time.time()
-scheduler = DPMSolverMultistepScheduler(
-    beta_start=0.00085,
-    beta_end=0.012,
-    beta_schedule="scaled_linear",
-    num_train_timesteps=1000,
-    trained_betas=None,
-    prediction_type="epsilon",
-    thresholding=False,
-    algorithm_type="dpmsolver++",
-    solver_type="midpoint",
-    lower_order_final=True,
+
+scheduler = DDIMScheduler.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
+    subfolder="scheduler",
 )
 
 vae = AutoencoderKL.from_pretrained(
     "runwayml/stable-diffusion-v1-5", subfolder="vae", torch_dtype=torch.float16
 )
-pipe_t2i = StableDiffusionPipeline.from_pretrained(
+
+text_encoder = CLIPTextModel.from_pretrained(
     "/root/workspace/storage/models/orangemix",
-    vae=vae,
+    subfolder="text_encoder",
     torch_dtype=torch.float16,
+)
+
+tokenizer = CLIPTokenizer.from_pretrained(
+    "/root/workspace/storage/models/orangemix",
+    subfolder="tokenizer",
+    torch_dtype=torch.float16,
+)
+
+unet = UNet2DConditionModel.from_pretrained(
+    "/root/workspace/storage/models/orangemix",
+    subfolder="unet",
+    torch_dtype=torch.float16,
+)
+
+pipe = StableDiffusionPipeline(
+    text_encoder=text_encoder,
+    tokenizer=tokenizer,
+    unet=unet,
+    vae=vae,
     scheduler=scheduler,
 )
 
-pipe_i2i = StableDiffusionImg2ImgPipeline.from_pretrained(
-    "/root/workspace/storage/models/orangemix",
-    vae=vae,
-    unet=pipe_t2i.unet,
-    torch_dtype=torch.float16,
-    scheduler=scheduler,
-)
-
-pipe = pipe_t2i
-unet = pipe.unet
-pipe.unet.set_attn_processor(CrossAttnProcessor)
-hook_unet(pipe.tokenizer, pipe.unet)
+unet.set_attn_processor(CrossAttnProcessor)
+# hook_unet(tokenizer, unet, scheduler)
 
 if torch.cuda.is_available():
-    pipe_t2i = pipe_t2i.to("cuda")
-    pipe_i2i = pipe_i2i.to("cuda")
+    pipe = pipe.to("cuda")
 
-device = "GPU 🔥" if torch.cuda.is_available() else "CPU 🥶"
+def get_model_list():
+    model_available = []
+    for model in models:
+        if Path(model[1]).is_dir():
+           model_available.append(model)
+    return model_available 
 
+unet_cache = dict()
+def get_model(name):
+    keys = [k[0] for k in models]
+    if name not in unet_cache:
+        if name not in keys:
+            raise ValueError(name)
+        else:
+            unet = UNet2DConditionModel.from_pretrained(
+                models[keys.index(name)][1],
+                subfolder="unet",
+                torch_dtype=torch.float16,
+            )
+            unet.set_attn_processor(CrossAttnProcessor)
+            unet_cache[name] = unet
+    return unet_cache[name]
+    
 
 def error_str(error, title="Error"):
     return (
@@ -64,6 +126,19 @@ def error_str(error, title="Error"):
             {error}"""
         if error
         else ""
+    )
+
+
+te_base_weight = text_encoder.get_input_embeddings().weight.data.detach().clone()
+
+
+def restore_all():
+    global te_base_weight, tokenizer
+    text_encoder.get_input_embeddings().weight.data = te_base_weight
+    tokenizer = CLIPTokenizer.from_pretrained(
+        "/root/workspace/storage/models/orangemix",
+        subfolder="tokenizer",
+        torch_dtype=torch.float16,
     )
 
 
@@ -79,16 +154,51 @@ def inference(
     g_strength=0.4,
     img_input=None,
     i2i_scale=0.5,
+    hr_enabled=False,
+    hr_method="Latent",
+    hr_scale=1.5,
+    hr_denoise=0.8,
+    sampler="DPM++ 2M Karras",
+    embs=None,
+    model=None,
 ):
-    global pipe_t2i, pipe_i2i
-    generator = torch.Generator("cuda").manual_seed(seed) if seed != 0 else None
-    set_state(pipe.unet, prompt, state, g_strength, guidance > 1)
+    global pipe, unet, tokenizer, text_encoder
+    pipe.unet = get_model(model)
+    seed = int(seed)
+    if seed == 0 or seed is None:
+        seed = int(random.randrange(6894327513))
+    generator = torch.Generator("cuda").manual_seed(seed) 
+    sampler_name, sampler_opt = None, None
+    for label, funcname, options in samplers_k_diffusion:
+        if label == sampler:
+            sampler_name, sampler_opt = funcname, options
+
+    if embs is not None and len(embs) > 0:
+        delta_weight = []
+        for name, file in embs.items():
+            if str(file).endswith(".pt"):
+                loaded_learned_embeds = torch.load(file, map_location="cpu")
+            else:
+                loaded_learned_embeds = load_file(file, device="cpu")
+            loaded_learned_embeds = loaded_learned_embeds["string_to_param"]["*"]
+            tokenizer.add_tokens(name)
+            delta_weight.append(loaded_learned_embeds)
+
+        delta_weight = torch.cat(delta_weight, dim=0)
+        text_encoder.resize_token_embeddings(len(tokenizer))
+        text_encoder.get_input_embeddings().weight.data[
+            -delta_weight.shape[0] :
+        ] = delta_weight
 
     config = {
         "negative_prompt": neg_prompt,
         "num_inference_steps": int(steps),
         "guidance_scale": guidance,
         "generator": generator,
+        "sampler_name": sampler_name,
+        "sampler_opt": sampler_opt,
+        "pww_state": state,
+        "pww_attn_weight": g_strength,
     }
 
     if img_input is not None:
@@ -96,10 +206,25 @@ def inference(
         img_input = img_input.resize(
             (int(img_input.width * ratio), int(img_input.height * ratio)), Image.LANCZOS
         )
-        result = pipe_i2i(prompt, image=img_input, strength=i2i_scale, **config)
+        result = pipe.img2img(prompt, image=img_input, strength=i2i_scale, **config)
+    elif hr_enabled:
+        result = pipe.txt2img(
+            prompt,
+            width=width,
+            height=height,
+            upscale=True,
+            upscale_x=hr_scale,
+            upscale_denoising_strength=hr_denoise,
+            **config,
+            **latent_upscale_modes[hr_method],
+        )
     else:
-        result = pipe_t2i(prompt, width=width, height=height, **config)
-    return result[0][0]
+        result = pipe.txt2img(prompt, width=width, height=height, **config)
+
+    # restore
+    if embs is not None and len(embs) > 0:
+        restore_all()
+    return gr.Image.update(result[0][0], label=f"Image Seed: {seed}")
 
 
 color_list = []
@@ -158,7 +283,7 @@ def detect_text(text, state, width, height):
         else:
             new_state[item] = {
                 "map": None,
-                "weight": 1.0,
+                "weight": 0.5,
             }
     update = gr.Radio.update(choices=[key for key in new_state.keys()], value=None)
     update_img = gr.update(value=create_mixed_img("", new_state, width, height))
@@ -178,13 +303,13 @@ def resize(img, w, h):
     return result
 
 
-def switch_canvas(entry, state):
+def switch_canvas(entry, state, width, height):
     if entry == None:
-        return None, 1.0, create_mixed_img("", state)
+        return None, 0.5, create_mixed_img("", state, width, height)
     return (
         gr.update(value=None, interactive=True),
         gr.update(value=state[entry]["weight"]),
-        create_mixed_img(entry, state),
+        create_mixed_img(entry, state, width, height),
     )
 
 
@@ -205,6 +330,43 @@ def apply_image(image, selected, w, h, strgength, state):
         state[selected] = {"map": resize(image, w, h), "weight": strgength}
     return state, gr.Image.update(value=create_mixed_img(selected, state, w, h))
 
+
+def add_ti(embs: list[tempfile._TemporaryFileWrapper], state):
+    if embs is None:
+        return state, ""
+    
+    state = dict()
+    for emb in embs:
+        item = Path(emb.name)
+        stripedname = str(item.stem).strip()
+        state[stripedname] = emb.name
+
+    return state, gr.Text.update(f"{[key for key in state.keys()]}")
+
+
+# def add_lora(loras: list[tempfile._TemporaryFileWrapper], state):
+#     for lora in loras:
+#         item = Path(lora.name)
+#         stripedname = str(item.stem).strip()
+#         state[stripedname] = lora.name
+
+#     return state, gr.Text.update(f"{[key for key in state.keys()]}")
+
+
+latent_upscale_modes = {
+    "Latent": {"upscale_method": "bilinear", "upscale_antialias": False},
+    "Latent (antialiased)": {"upscale_method": "bilinear", "upscale_antialias": True},
+    "Latent (bicubic)": {"upscale_method": "bicubic", "upscale_antialias": False},
+    "Latent (bicubic antialiased)": {
+        "upscale_method": "bicubic",
+        "upscale_antialias": True,
+    },
+    "Latent (nearest)": {"upscale_method": "nearest", "upscale_antialias": False},
+    "Latent (nearest-exact)": {
+        "upscale_method": "nearest-exact",
+        "upscale_antialias": False,
+    },
+}
 
 css = """
 .finetuned-diffusion-div div{
@@ -240,18 +402,18 @@ a{
 #gallery{
     min-height:20rem
 }
+.no-border {
+    border: none !important;
+}
  """
 with gr.Blocks(css=css) as demo:
     gr.HTML(
         f"""
             <div class="finetuned-diffusion-div">
               <div>
-                <h1>Demo for orangemix</h1>
+                <h1>Demo for diffusion models</h1>
               </div>
-              <p>
-                <br />
-                <a style="display:inline-block" href="https://huggingface.co/spaces/akhaliq/anything-v3.0?duplicate=true"><img src="https://img.shields.io/badge/-Duplicate%20Space-blue?labelColor=white&style=flat&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAP5JREFUOE+lk7FqAkEURY+ltunEgFXS2sZGIbXfEPdLlnxJyDdYB62sbbUKpLbVNhyYFzbrrA74YJlh9r079973psed0cvUD4A+4HoCjsA85X0Dfn/RBLBgBDxnQPfAEJgBY+A9gALA4tcbamSzS4xq4FOQAJgCDwV2CPKV8tZAJcAjMMkUe1vX+U+SMhfAJEHasQIWmXNN3abzDwHUrgcRGmYcgKe0bxrblHEB4E/pndMazNpSZGcsZdBlYJcEL9Afo75molJyM2FxmPgmgPqlWNLGfwZGG6UiyEvLzHYDmoPkDDiNm9JR9uboiONcBXrpY1qmgs21x1QwyZcpvxt9NS09PlsPAAAAAElFTkSuQmCC&logoWidth=14" alt="Duplicate Space"></a>       </p>
-              </p>
+              <p>Hso @ nyanko.sketch2img.pww_gradio</p>
             </div>
         """
     )
@@ -260,78 +422,168 @@ with gr.Blocks(css=css) as demo:
     with gr.Row():
 
         with gr.Column(scale=55):
-
-                image_out = gr.Image(height=512)
-                # gallery = gr.Gallery(
-                #     label="Generated images", show_label=False, elem_id="gallery"
-                # ).style(grid=[1], height="auto")
+                        model = gr.Dropdown(
+                            choices=[k[0] for k in get_model_list()],
+                            label="Model",
+                            value="AbyssOrangeMix_Base",
+                        )
+                        image_out = gr.Image(height=512)
+            # gallery = gr.Gallery(
+            #     label="Generated images", show_label=False, elem_id="gallery"
+            # ).style(grid=[1], height="auto")
 
         with gr.Column(scale=45):
-            
-                with gr.Group():
-                
-                    model = gr.Textbox(
-                        interactive=False,
-                        label="Model",
-                        placeholder="Worangemix-Modified",
+
+            with gr.Group():
+
+                with gr.Row():
+                    with gr.Column(scale=70):
+
+
+                        prompt = gr.Textbox(
+                            label="Prompt",
+                            value="loli cat girl, blue eyes, flat chest, solo, long messy silver hair, blue capelet, garden, cat ears, cat tail, upper body",
+                            show_label=True,
+                            max_lines=2,
+                            placeholder="Enter prompt.",
+                        )
+                        neg_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            value="bad quality, low quality, jpeg artifact, cropped",
+                            show_label=True,
+                            max_lines=2,
+                            placeholder="Enter negative prompt.",
+                        )
+
+                    generate = gr.Button(value="Generate").style(
+                        rounded=(False, True, True, False)
                     )
-                
-                    with gr.Row():
-                        with gr.Column(scale=70):
-                            prompt = gr.Textbox(
-                                    label="Prompt",
-                                    show_label=True,
-                                    max_lines=2,
-                                    placeholder="Enter prompt.",
-                            )
-                            neg_prompt = gr.Textbox(
-                                    label="Negative Prompt",
-                                    show_label=True,
-                                    max_lines=2,
-                                    placeholder="Enter negative prompt.",
-                            )
-                            
-                        generate = gr.Button(value="Generate").style(rounded=(False, True, True, False))
-            
-                        
-                with gr.Tab("Options"):
-                    
-                    with gr.Group():
+
+            with gr.Tab("Options"):
+
+                with gr.Group():
 
                     # n_images = gr.Slider(label="Images", value=1, minimum=1, maximum=4, step=1)
-                        with gr.Row():
-                            guidance = gr.Slider(label="Guidance scale", value=7.5, maximum=15)
-                            steps = gr.Slider(
-                                label="Steps", value=25, minimum=2, maximum=75, step=1
-                            )
+                    with gr.Row():
+                        guidance = gr.Slider(
+                            label="Guidance scale", value=7.5, maximum=15
+                        )
+                        steps = gr.Slider(
+                            label="Steps", value=25, minimum=2, maximum=75, step=1
+                        )
 
-                        with gr.Row():
-                            width = gr.Slider(
-                                label="Width", value=512, minimum=64, maximum=1024, step=8
-                            )
-                            height = gr.Slider(
-                                label="Height", value=512, minimum=64, maximum=1024, step=8
-                            )
+                    with gr.Row():
+                        width = gr.Slider(
+                            label="Width", value=512, minimum=64, maximum=2048, step=64
+                        )
+                        height = gr.Slider(
+                            label="Height", value=512, minimum=64, maximum=2048, step=64
+                        )
 
-                        seed = gr.Slider(
-                            0, 2147483647, label="Seed (0 = random)", value=0, step=1
+                    sampler = gr.Dropdown(
+                        value="DPM++ 2M Karras",
+                        label="Sampler",
+                        choices=[s[0] for s in samplers_k_diffusion],
+                    )
+                    seed = gr.Number(label="Seed (0 = random)", value=0)
+
+            with gr.Tab("Image to image"):
+                with gr.Group():
+
+                    inf_image = gr.Image(
+                        label="Image", height=256, tool="editor", type="pil"
+                    )
+                    inf_strength = gr.Slider(
+                        label="Transformation strength",
+                        minimum=0,
+                        maximum=1,
+                        step=0.01,
+                        value=0.5,
+                    )
+
+            def res_cap(g, w, h, x):
+                if g:
+                    return f"Enable upscaler: {w}x{h} to {int(w*x)}x{int(h*x)}"
+                else:
+                    return "Enable upscaler"
+
+            with gr.Tab("Hires fix"):
+                with gr.Group():
+
+                    hr_enabled = gr.Checkbox(label="Enable upscaler", value=False)
+                    hr_method = gr.Dropdown(
+                        [key for key in latent_upscale_modes.keys()],
+                        value="Latent",
+                        label="Upscale method",
+                    )
+                    hr_scale = gr.Slider(
+                        label="Upscale factor",
+                        minimum=1.0,
+                        maximum=3,
+                        step=0.1,
+                        value=1.5,
+                    )
+                    hr_denoise = gr.Slider(
+                        label="Denoising strength",
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.1,
+                        value=0.8,
+                    )
+
+                    hr_scale.change(
+                        lambda g, x, w, h: gr.Checkbox.update(
+                            label=res_cap(g, w, h, x)
+                        ),
+                        inputs=[hr_enabled, hr_scale, width, height],
+                        outputs=hr_enabled,
+                    )
+                    hr_enabled.change(
+                        lambda g, x, w, h: gr.Checkbox.update(
+                            label=res_cap(g, w, h, x)
+                        ),
+                        inputs=[hr_enabled, hr_scale, width, height],
+                        outputs=hr_enabled,
+                    )
+
+            with gr.Tab("Embeddings"):
+
+                ti_state = gr.State(dict())
+                
+                with gr.Group():
+                    with gr.Row():
+                        with gr.Column(scale=90):
+                            ti_vals = gr.Text(label="Avaliable")
+                            
+                        btn = gr.Button(value="Update").style(
+                            rounded=(False, True, True, False)
                         )
                         
+                ti_uploads = gr.Files(
+                        label="Upload new embeddings",
+                        file_types=[".pt", ".safetensors"],
+                )
+                btn.click(
+                    add_ti, inputs=[ti_uploads, ti_state], outputs=[ti_state, ti_vals]
+                )
 
-                with gr.Tab("Image to image"):
-                    with gr.Group():
-                        
-                        inf_image = gr.Image(label="Image", height=256, tool="editor", type="pil")
-                        inf_strength = gr.Slider(label="Transformation strength", minimum=0, maximum=1, step=0.01, value=0.5)
+            # with gr.Tab("Loras"):
 
+            #         lora_state = gr.State(dict())
+            #         lora_vals = gr.Text(label="Avaliable")
             
-            # error_output = gr.Markdown()
+            #         lora_uploads = gr.Files(label="Upload new loras", file_types=[".pt", ".safetensors"])
+
+            #         btn2 = gr.Button(value='Upload')
+            #         btn2.click(add_lora, inputs=[lora_uploads, lora_state], outputs=[lora_state, lora_vals])
+
+        # error_output = gr.Markdown()
 
     gr.HTML(
         f"""
             <div class="finetuned-diffusion-div">
               <div>
-                <h1>Sketch Injection</h1>
+                <h1>Paint with words</h1>
               </div>
               <p>
                 Will use the following formula: w = scale * token_weight_martix * log(1 + sigma) * max(qk).
@@ -354,22 +606,27 @@ with gr.Blocks(css=css) as demo:
         with gr.Column(scale=45):
 
             with gr.Group():
+                with gr.Row():
+                    with gr.Column(scale=70):
+                        g_strength = gr.Slider(
+                            label="Weight scaling",
+                            minimum=0,
+                            maximum=0.8,
+                            step=0.01,
+                            value=0.4,
+                        )
 
-                g_strength = gr.Slider(
-                    label="Weight scaling",
-                    minimum=0,
-                    maximum=2,
-                    step=0.01,
-                    value=0.6,
-                )
-                
-                text = gr.Textbox(
-                    lines=2,
-                    interactive=True,
-                    label="Token to Draw: (Separate by comma)",
-                )
+                        text = gr.Textbox(
+                            lines=2,
+                            interactive=True,
+                            label="Token to Draw: (Separate by comma)",
+                        )
 
-                radio = gr.Radio([], label="Tokens")
+                        radio = gr.Radio([], label="Tokens")
+
+                    sk_update = gr.Button(value="Update").style(
+                        rounded=(False, True, True, False)
+                    )
 
                 # g_strength.change(lambda b: gr.update(f"Scaled additional attn: $w = {b} \log (1 + \sigma) \std (Q^T K)$."), inputs=g_strength, outputs=[g_output])
 
@@ -383,21 +640,21 @@ with gr.Blocks(css=css) as demo:
                 )
 
                 strength = gr.Slider(
-                    label="Token weight",
+                    label="Token strength",
                     minimum=0,
-                    maximum=2,
+                    maximum=0.8,
                     step=0.01,
-                    value=1.0,
+                    value=0.5,
                 )
 
-                text.change(
+                sk_update.click(
                     detect_text,
                     inputs=[text, global_stats, width, height],
                     outputs=[global_stats, sp, radio, rendered],
                 )
                 radio.change(
                     switch_canvas,
-                    inputs=[radio, global_stats],
+                    inputs=[radio, global_stats, width, height],
                     outputs=[sp, strength, rendered],
                 )
                 sp.edit(
@@ -422,9 +679,9 @@ with gr.Blocks(css=css) as demo:
                 strength2 = gr.Slider(
                     label="Token strength",
                     minimum=0,
-                    maximum=2,
+                    maximum=0.8,
                     step=0.01,
-                    value=1.0,
+                    value=0.5,
                 )
 
                 apply_style = gr.Button(value="Apply")
@@ -461,10 +718,18 @@ with gr.Blocks(css=css) as demo:
         g_strength,
         inf_image,
         inf_strength,
+        hr_enabled,
+        hr_method,
+        hr_scale,
+        hr_denoise,
+        sampler,
+        ti_state,
+        model,
     ]
     outputs = [image_out]
     prompt.submit(inference, inputs=inputs, outputs=outputs)
     generate.click(inference, inputs=inputs, outputs=outputs)
 
 print(f"Space built in {time.time() - start_time:.2f} seconds")
-demo.launch(debug=True, share=False)
+# demo.launch(share=True)
+demo.launch(share=True, enable_queue=True)
