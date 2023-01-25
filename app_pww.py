@@ -163,7 +163,7 @@ def inference(
     model=None,
 ):
     global pipe, unet, tokenizer, text_encoder
-    pipe.unet = get_model(model)
+    pipe.setup_unet(get_model(model))
     seed = int(seed)
     if seed == 0 or seed is None:
         seed = int(random.randrange(6894327513))

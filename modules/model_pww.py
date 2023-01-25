@@ -1,6 +1,7 @@
 import importlib
 import inspect
 import math
+import re
 from typing import List, Optional, Union
 
 import k_diffusion
@@ -193,9 +194,12 @@ class StableDiffusionPipeline(DiffusionPipeline):
             unet=unet,
             scheduler=scheduler,
         )
-
-        model = ModelWrapper(unet, scheduler.alphas_cumprod)
-        if scheduler.prediction_type == "v_prediction":
+        self.setup_unet(self.unet)
+            
+    def setup_unet(self, unet):
+        unet = unet.to(self.device)
+        model = ModelWrapper(unet, self.scheduler.alphas_cumprod)
+        if self.scheduler.prediction_type == "v_prediction":
             self.k_diffusion_model = CompVisVDenoiser(model)
         else:
             self.k_diffusion_model = CompVisDenoiser(model)
