@@ -11,19 +11,23 @@ from diffusers import (
     DDIMScheduler,
     UNet2DConditionModel,
 )
-from modules.model_pww import CrossAttnProcessor, StableDiffusionPipeline
+from modules.model_pww import CrossAttnProcessor, StableDiffusionPipeline, load_lora_attn_procs
 from torchvision import transforms
 from transformers import CLIPTokenizer, CLIPTextModel
 from PIL import Image
 from pathlib import Path
 from safetensors.torch import load_file
+import modules.safe as _
 
 models = [
     ("AbyssOrangeMix_Base", "/root/workspace/storage/models/orangemix"),
     ("AbyssOrangeMix2", "/root/models/AbyssOrangeMix2"),
     ("Stable Diffuison 1.5", "/root/models/stable-diffusion-v1-5"),
-    ("AnimeSFW", "/root/workspace/animesfw")
+    ("AnimeSFW", "/root/workspace/animesfw"),
 ]
+
+base_name = "AbyssOrangeMix_Base"
+base_model = "/root/workspace/storage/models/orangemix"
 
 samplers_k_diffusion = [
     ("Euler a", "sample_euler_ancestral", {}),
@@ -56,32 +60,28 @@ samplers_k_diffusion = [
 start_time = time.time()
 
 scheduler = DDIMScheduler.from_pretrained(
-    "runwayml/stable-diffusion-v1-5",
+    base_model,
     subfolder="scheduler",
 )
-
 vae = AutoencoderKL.from_pretrained(
-    "runwayml/stable-diffusion-v1-5", subfolder="vae", torch_dtype=torch.float16
+    "stabilityai/sd-vae-ft-ema", 
+    torch_dtype=torch.float32
 )
-
 text_encoder = CLIPTextModel.from_pretrained(
-    "/root/workspace/storage/models/orangemix",
+    base_model,
     subfolder="text_encoder",
     torch_dtype=torch.float16,
 )
-
 tokenizer = CLIPTokenizer.from_pretrained(
-    "/root/workspace/storage/models/orangemix",
+    base_model,
     subfolder="tokenizer",
     torch_dtype=torch.float16,
 )
-
 unet = UNet2DConditionModel.from_pretrained(
-    "/root/workspace/storage/models/orangemix",
+    base_model,
     subfolder="unet",
     torch_dtype=torch.float16,
 )
-
 pipe = StableDiffusionPipeline(
     text_encoder=text_encoder,
     tokenizer=tokenizer,
@@ -91,19 +91,20 @@ pipe = StableDiffusionPipeline(
 )
 
 unet.set_attn_processor(CrossAttnProcessor)
-# hook_unet(tokenizer, unet, scheduler)
-
 if torch.cuda.is_available():
     pipe = pipe.to("cuda")
-
+    
 def get_model_list():
     model_available = []
     for model in models:
         if Path(model[1]).is_dir():
-           model_available.append(model)
-    return model_available 
+            model_available.append(model)
+    return model_available
+
 
 unet_cache = dict()
+
+
 def get_model(name):
     keys = [k[0] for k in models]
     if name not in unet_cache:
@@ -115,10 +116,12 @@ def get_model(name):
                 subfolder="unet",
                 torch_dtype=torch.float16,
             )
-            unet.set_attn_processor(CrossAttnProcessor)
             unet_cache[name] = unet
-    return unet_cache[name]
     
+    g_unet = unet_cache[name]
+    g_unet.set_attn_processor(None)
+    return g_unet
+
 
 def error_str(error, title="Error"):
     return (
@@ -161,13 +164,21 @@ def inference(
     sampler="DPM++ 2M Karras",
     embs=None,
     model=None,
+    lora_state=None,
+    lora_scale=None,
 ):
     global pipe, unet, tokenizer, text_encoder
-    pipe.setup_unet(get_model(model))
-    seed = int(seed)
-    if seed == 0 or seed is None:
-        seed = int(random.randrange(6894327513))
-    generator = torch.Generator("cuda").manual_seed(seed) 
+    if seed is None or seed == 0:
+        seed = random.randint(0, 2147483647)
+    generator = torch.Generator("cuda").manual_seed(int(seed))
+    
+    local_unet = get_model(model)
+    if lora_state is not None and lora_state != "":
+        load_lora_attn_procs(lora_state, local_unet, lora_scale)
+    else:
+        local_unet.set_attn_processor(CrossAttnProcessor())
+
+    pipe.setup_unet(local_unet)
     sampler_name, sampler_opt = None, None
     for label, funcname, options in samplers_k_diffusion:
         if label == sampler:
@@ -181,14 +192,14 @@ def inference(
             else:
                 loaded_learned_embeds = load_file(file, device="cpu")
             loaded_learned_embeds = loaded_learned_embeds["string_to_param"]["*"]
-            tokenizer.add_tokens(name)
+            added_length = tokenizer.add_tokens(name)
+            
+            assert added_length == loaded_learned_embeds.shape[0]
             delta_weight.append(loaded_learned_embeds)
 
         delta_weight = torch.cat(delta_weight, dim=0)
         text_encoder.resize_token_embeddings(len(tokenizer))
-        text_encoder.get_input_embeddings().weight.data[
-            -delta_weight.shape[0] :
-        ] = delta_weight
+        text_encoder.get_input_embeddings().weight.data[-delta_weight.shape[0]:] = delta_weight
 
     config = {
         "negative_prompt": neg_prompt,
@@ -224,7 +235,7 @@ def inference(
     # restore
     if embs is not None and len(embs) > 0:
         restore_all()
-    return gr.Image.update(result[0][0], label=f"Image Seed: {seed}")
+    return gr.Image.update(result[0][0], label=f"Initial Seed: {seed}")
 
 
 color_list = []
@@ -331,26 +342,25 @@ def apply_image(image, selected, w, h, strgength, state):
     return state, gr.Image.update(value=create_mixed_img(selected, state, w, h))
 
 
-def add_ti(embs: list[tempfile._TemporaryFileWrapper], state):
-    if embs is None:
-        return state, ""
-    
-    state = dict()
-    for emb in embs:
-        item = Path(emb.name)
+# [ti_state, lora_state, ti_vals, lora_vals, uploads]
+def add_net(files: list[tempfile._TemporaryFileWrapper], ti_state, lora_state):
+    if files is None:
+        return ti_state, "", lora_state, None
+
+    for file in files:
+        item = Path(file.name)
         stripedname = str(item.stem).strip()
-        state[stripedname] = emb.name
+        state_dict = torch.load(file.name, map_location="cpu")
+        if any("lora" in k for k in state_dict.keys()):
+            lora_state = file.name
+        else:
+            ti_state[stripedname] = file.name
 
-    return state, gr.Text.update(f"{[key for key in state.keys()]}")
+    return ti_state, lora_state, gr.Text.update(f"{[key for key in ti_state.keys()]}"), gr.Text.update(f"{lora_state}"), gr.Files.update(value=None)
 
-
-# def add_lora(loras: list[tempfile._TemporaryFileWrapper], state):
-#     for lora in loras:
-#         item = Path(lora.name)
-#         stripedname = str(item.stem).strip()
-#         state[stripedname] = lora.name
-
-#     return state, gr.Text.update(f"{[key for key in state.keys()]}")
+# [ti_state, lora_state, ti_vals, lora_vals, uploads]
+def clean_states(ti_state, lora_state):
+    return dict(), None, gr.Text.update(f""), gr.Text.update(f""), gr.File.update(value=None)
 
 
 latent_upscale_modes = {
@@ -413,7 +423,7 @@ with gr.Blocks(css=css) as demo:
               <div>
                 <h1>Demo for diffusion models</h1>
               </div>
-              <p>Hso @ nyanko.sketch2img.pww_gradio</p>
+              <p>Hso @ nyanko.sketch2img.gradio</p>
             </div>
         """
     )
@@ -422,15 +432,15 @@ with gr.Blocks(css=css) as demo:
     with gr.Row():
 
         with gr.Column(scale=55):
-                        model = gr.Dropdown(
-                            choices=[k[0] for k in get_model_list()],
-                            label="Model",
-                            value="AbyssOrangeMix_Base",
-                        )
-                        image_out = gr.Image(height=512)
-            # gallery = gr.Gallery(
-            #     label="Generated images", show_label=False, elem_id="gallery"
-            # ).style(grid=[1], height="auto")
+            model = gr.Dropdown(
+                choices=[k[0] for k in get_model_list()],
+                label="Model",
+                value=base_name,
+            )
+            image_out = gr.Image(height=512)
+        # gallery = gr.Gallery(
+        #     label="Generated images", show_label=False, elem_id="gallery"
+        # ).style(grid=[1], height="auto")
 
         with gr.Column(scale=45):
 
@@ -439,19 +449,18 @@ with gr.Blocks(css=css) as demo:
                 with gr.Row():
                     with gr.Column(scale=70):
 
-
                         prompt = gr.Textbox(
                             label="Prompt",
                             value="loli cat girl, blue eyes, flat chest, solo, long messy silver hair, blue capelet, garden, cat ears, cat tail, upper body",
                             show_label=True,
-                            max_lines=2,
+                            max_lines=4,
                             placeholder="Enter prompt.",
                         )
                         neg_prompt = gr.Textbox(
                             label="Negative Prompt",
                             value="bad quality, low quality, jpeg artifact, cropped",
                             show_label=True,
-                            max_lines=2,
+                            max_lines=4,
                             placeholder="Enter negative prompt.",
                         )
 
@@ -546,36 +555,41 @@ with gr.Blocks(css=css) as demo:
                         outputs=hr_enabled,
                     )
 
-            with gr.Tab("Embeddings"):
+            with gr.Tab("Embeddings/Loras"):
 
                 ti_state = gr.State(dict())
-                
+                lora_state = gr.State()
+
                 with gr.Group():
                     with gr.Row():
                         with gr.Column(scale=90):
-                            ti_vals = gr.Text(label="Avaliable")
-                            
-                        btn = gr.Button(value="Update").style(
-                            rounded=(False, True, True, False)
-                        )
+                            ti_vals = gr.Text(label="Loaded embeddings")
                         
-                ti_uploads = gr.Files(
-                        label="Upload new embeddings",
-                        file_types=[".pt", ".safetensors"],
-                )
+                    with gr.Row():
+                        with gr.Column(scale=90):
+                            lora_vals = gr.Text(label="Loaded loras")
+
+                with gr.Row():
+                        
+                    uploads = gr.Files(label="Upload new embeddings/lora")
+                    
+                    with gr.Column():
+                        lora_scale = gr.Slider(
+                            label="Lora scale",
+                            minimum=0,
+                            maximum=2,
+                            step=0.01,
+                            value=1.0,
+                        )
+                        btn = gr.Button(value="Upload")
+                        btn_del = gr.Button(value="Reset")
+                        
                 btn.click(
-                    add_ti, inputs=[ti_uploads, ti_state], outputs=[ti_state, ti_vals]
+                    add_net, inputs=[uploads, ti_state, lora_state], outputs=[ti_state, lora_state, ti_vals, lora_vals, uploads]
                 )
-
-            # with gr.Tab("Loras"):
-
-            #         lora_state = gr.State(dict())
-            #         lora_vals = gr.Text(label="Avaliable")
-            
-            #         lora_uploads = gr.Files(label="Upload new loras", file_types=[".pt", ".safetensors"])
-
-            #         btn2 = gr.Button(value='Upload')
-            #         btn2.click(add_lora, inputs=[lora_uploads, lora_state], outputs=[lora_state, lora_vals])
+                btn_del.click(
+                    clean_states, inputs=[ti_state, lora_state], outputs=[ti_state, lora_state, ti_vals, lora_vals, uploads]
+                )
 
         # error_output = gr.Markdown()
 
@@ -725,6 +739,8 @@ with gr.Blocks(css=css) as demo:
         sampler,
         ti_state,
         model,
+        lora_state,
+        lora_scale
     ]
     outputs = [image_out]
     prompt.submit(inference, inputs=inputs, outputs=outputs)

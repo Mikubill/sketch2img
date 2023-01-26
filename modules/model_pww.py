@@ -2,24 +2,26 @@ import importlib
 import inspect
 import math
 import re
+from collections import defaultdict
 from typing import List, Optional, Union
 
 import k_diffusion
 import numpy as np
 import PIL
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-import math
-import torch
-from torch import nn, einsum
-from torch.autograd.function import Function
-
 from einops import rearrange
 from k_diffusion.external import CompVisDenoiser, CompVisVDenoiser
+from modules.prompt_parser import FrozenCLIPEmbedderWithCustomWords
+from torch import einsum
+from torch.autograd.function import Function
 
 from diffusers import DiffusionPipeline
-from diffusers.models.cross_attention import CrossAttention
-from diffusers.utils import (PIL_INTERPOLATION, is_accelerate_available, logging, randn_tensor)
+from diffusers.utils import PIL_INTERPOLATION, is_accelerate_available
+from diffusers.utils import logging, randn_tensor
+
+import modules.safe
 
 xformers_available = False
 try: 
@@ -61,99 +63,184 @@ def get_attention_scores(attn, query, key, attention_mask=None):
 
     return attention_scores
 
-
-def CrossAttnProcessor(
-    attn: CrossAttention, hidden_states, encoder_hidden_states=None, attention_mask=None
-):
-    batch_size, sequence_length, _ = hidden_states.shape
-    attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)
     
-    query = attn.to_q(hidden_states)
-    query = attn.head_to_batch_dim(query)
-
-    encoder_states = hidden_states
-    is_xattn = False
-    if encoder_hidden_states is not None:
-        is_xattn = True
-        img_state = encoder_hidden_states["img_state"]
-        encoder_states = encoder_hidden_states["states"]
-        weight_func = encoder_hidden_states["weight_func"]
-        sigma = encoder_hidden_states["sigma"]
-
-    key = attn.to_k(encoder_states)
-    value = attn.to_v(encoder_states)
-    key = attn.head_to_batch_dim(key)
-    value = attn.head_to_batch_dim(value)
-
-    if is_xattn and isinstance(img_state, dict):
-        # use torch.baddbmm method (slow)
-        attention_scores = get_attention_scores(attn, query, key, attention_mask)
-        w = img_state[sequence_length].to(query.device)
-        cross_attention_weight = weight_func(w, sigma, attention_scores)
-        attention_scores += torch.repeat_interleave(cross_attention_weight, repeats=attn.heads, dim=0)
+def load_lora_attn_procs(model_file, unet, scale=1.0):
         
-        # calc probs
-        attention_probs = attention_scores.softmax(dim=-1)
-        attention_probs = attention_probs.to(query.dtype)
-        hidden_states = torch.bmm(attention_probs, value)
+        state_dict = torch.load(model_file, map_location="cpu")
         
-    elif xformers_available:
-        hidden_states = xformers.ops.memory_efficient_attention(
-            query.contiguous(), key.contiguous(), value.contiguous(), attn_bias=attention_mask
-        )
-        hidden_states = hidden_states.to(query.dtype)
+        # 'lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight'
+        # 'down_blocks.0.attentions.0.transformer_blocks.0.attn1.processor.to_q_lora.down.weight'
+        if any("lora_unet_down_blocks"in k for k in state_dict.keys()):
+            # extract ldm format lora
+            df_lora = {}
+            attn_numlayer = re.compile(r'_attn(\d)_to_([qkv]|out).lora_')
+            alpha_numlayer = re.compile(r'_attn(\d)_to_([qkv]|out).alpha')
+            for k, v in state_dict.items():
+                if "attn" not in k or "lora_te" in k:
+                    # currently not support: ff, clip-attn
+                    continue
+                k = k.replace("lora_unet_down_blocks_", "down_blocks.")
+                k = k.replace("lora_unet_up_blocks_", "up_blocks.")
+                k = k.replace("lora_unet_mid_block_", "mid_block_")
+                k = k.replace("_attentions_", ".attentions.")
+                k = k.replace("_transformer_blocks_", ".transformer_blocks.")
+                k = k.replace("to_out_0", "to_out")
+                k = attn_numlayer.sub(r'.attn\1.processor.to_\2_lora.', k)
+                k = alpha_numlayer.sub(r'.attn\1.processor.to_\2_lora.alpha', k)
+                df_lora[k] = v
+            state_dict = df_lora
+
+        # fill attn processors
+        attn_processors = {}
+
+        is_lora = all("lora" in k for k in state_dict.keys())
+
+        if is_lora:
+            lora_grouped_dict = defaultdict(dict)
+            for key, value in state_dict.items():
+                if "alpha" in key:
+                    attn_processor_key, sub_key = ".".join(key.split(".")[:-2]), ".".join(key.split(".")[-2:])
+                else:
+                    attn_processor_key, sub_key = ".".join(key.split(".")[:-3]), ".".join(key.split(".")[-3:])
+                lora_grouped_dict[attn_processor_key][sub_key] = value
+
+            for key, value_dict in lora_grouped_dict.items():
+                rank = value_dict["to_k_lora.down.weight"].shape[0]
+                cross_attention_dim = value_dict["to_k_lora.down.weight"].shape[1]
+                hidden_size = value_dict["to_k_lora.up.weight"].shape[0]
+
+                attn_processors[key] = LoRACrossAttnProcessor(
+                    hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, rank=rank, scale=scale
+                )
+                attn_processors[key].load_state_dict(value_dict, strict=False)
+
+        else:
+            raise ValueError(f"{model_file} does not seem to be in the correct format expected by LoRA training.")
+
+        # set correct dtype & device
+        attn_processors = {k: v.to(device=unet.device, dtype=unet.dtype) for k, v in attn_processors.items()}
+
+        # set layers
+        unet.set_attn_processor(attn_processors)
+
+
+class CrossAttnProcessor(nn.Module):        
+    def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, qkvo_bias=None):
+        batch_size, sequence_length, _ = hidden_states.shape
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)
+
+        encoder_states = hidden_states
+        is_xattn = False
+        if encoder_hidden_states is not None:
+            is_xattn = True
+            img_state = encoder_hidden_states["img_state"]
+            encoder_states = encoder_hidden_states["states"]
+            weight_func = encoder_hidden_states["weight_func"]
+            sigma = encoder_hidden_states["sigma"]
+
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(encoder_states)
+        value = attn.to_v(encoder_states)
+        
+        if qkvo_bias is not None:
+            query += qkvo_bias["q"](hidden_states)
+            key += qkvo_bias["k"](encoder_states)
+            value += qkvo_bias["v"](encoder_states)
+        
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+
+        if is_xattn and isinstance(img_state, dict):
+            # use torch.baddbmm method (slow)
+            attention_scores = get_attention_scores(attn, query, key, attention_mask)
+            w = img_state[sequence_length].to(query.device)
+            cross_attention_weight = weight_func(w, sigma, attention_scores)
+            attention_scores += torch.repeat_interleave(cross_attention_weight, repeats=attn.heads, dim=0)
+            
+            # calc probs
+            attention_probs = attention_scores.softmax(dim=-1)
+            attention_probs = attention_probs.to(query.dtype)
+            hidden_states = torch.bmm(attention_probs, value)
+            
+        elif xformers_available:
+            hidden_states = xformers.ops.memory_efficient_attention(
+                query.contiguous(), key.contiguous(), value.contiguous(), attn_bias=attention_mask
+            )
+            hidden_states = hidden_states.to(query.dtype)
+        
+        else:
+            q_bucket_size = 512
+            k_bucket_size = 1024
+            
+            # use flash-attention
+            hidden_states = FlashAttentionFunction.apply(
+                query.contiguous(), key.contiguous(), value.contiguous(), 
+                attention_mask, causal=False, q_bucket_size=q_bucket_size, k_bucket_size=k_bucket_size
+            )
+            hidden_states = hidden_states.to(query.dtype)
+            
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        
+        if qkvo_bias is not None:
+            hidden_states += qkvo_bias["o"](hidden_states)
+        
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        return hidden_states
     
-    else:
-        q_bucket_size = 512
-        k_bucket_size = 1024
+
+class LoRACrossAttnProcessor(CrossAttnProcessor):
+    def __init__(self, hidden_size, cross_attention_dim=None, rank=4, scale=1.0):
+        super().__init__()
+
+        self.to_q_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
+        self.to_k_lora = LoRALinearLayer(cross_attention_dim or hidden_size, hidden_size, rank)
+        self.to_v_lora = LoRALinearLayer(cross_attention_dim or hidden_size, hidden_size, rank)
+        self.to_out_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
+        self.scale = scale
         
-        # use flash-attention
-        hidden_states = FlashAttentionFunction.apply(
-            query.contiguous(), key.contiguous(), value.contiguous(), 
-            attention_mask, causal=False, q_bucket_size=q_bucket_size, k_bucket_size=k_bucket_size
-        )
-        hidden_states = hidden_states.to(query.dtype)
-        
-    hidden_states = attn.batch_to_head_dim(hidden_states)
-
-    # linear proj
-    hidden_states = attn.to_out[0](hidden_states)
-    # dropout
-    hidden_states = attn.to_out[1](hidden_states)
-
-    return hidden_states
+    def __call__(
+        self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, 
+    ):
+        scale = self.scale
+        qkvo_bias = {
+            "q": lambda inputs: scale * self.to_q_lora(inputs),
+            "k": lambda inputs: scale * self.to_k_lora(inputs),
+            "v": lambda inputs: scale * self.to_v_lora(inputs),
+            "o": lambda inputs: scale * self.to_out_lora(inputs),
+        }
+        return super().__call__(attn, hidden_states, encoder_hidden_states, attention_mask, qkvo_bias)
 
 
-def load_learned_embed_in_clip(
-    learned_embeds_path, text_encoder, tokenizer, token=None
-):
-    loaded_learned_embeds = torch.load(learned_embeds_path, map_location="cpu")
+class LoRALinearLayer(nn.Module):
+     def __init__(self, in_features, out_features, rank=4):
+         super().__init__()
 
-    # separate token and the embeds
-    trained_token = list(loaded_learned_embeds.keys())[0]
-    embeds = loaded_learned_embeds[trained_token]
+         if rank > min(in_features, out_features):
+             raise ValueError(f"LoRA rank {rank} must be less or equal than {min(in_features, out_features)}")
 
-    # cast to dtype of text_encoder
-    dtype = text_encoder.get_input_embeddings().weight.dtype
+         self.down = nn.Linear(in_features, rank, bias=False)
+         self.up = nn.Linear(rank, out_features, bias=False)
+         self.scale = 1.0
+         self.alpha = rank
 
-    # add the token in tokenizer
-    token = token if token is not None else trained_token
-    num_added_tokens = tokenizer.add_tokens(token)
-    i = 1
-    while num_added_tokens == 0:
-        print(f"The tokenizer already contains the token {token}.")
-        token = f"{token[:-1]}-{i}>"
-        print(f"Attempting to add the token {token}.")
-        num_added_tokens = tokenizer.add_tokens(token)
-        i += 1
+         nn.init.normal_(self.down.weight, std=1 / rank)
+         nn.init.zeros_(self.up.weight)
 
-    # resize the token embeddings
-    text_encoder.resize_token_embeddings(len(tokenizer))
+     def forward(self, hidden_states):
+         orig_dtype = hidden_states.dtype
+         dtype = self.down.weight.dtype
+         rank = self.down.out_features
 
-    # get the id for the token and assign the embeds
-    token_id = tokenizer.convert_tokens_to_ids(token)
-    text_encoder.get_input_embeddings().weight.data[token_id] = embeds
-    return token
+         down_hidden_states = self.down(hidden_states.to(dtype))
+         up_hidden_states = self.up(down_hidden_states) * (self.alpha / rank)
+
+         return up_hidden_states.to(orig_dtype)
 
 
 class ModelWrapper:
@@ -195,7 +282,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
             scheduler=scheduler,
         )
         self.setup_unet(self.unet)
-            
+        self.prompt_parser = FrozenCLIPEmbedderWithCustomWords(self.tokenizer, self.text_encoder)
+    
     def setup_unet(self, unet):
         unet = unet.to(self.device)
         model = ModelWrapper(unet, self.scheduler.alphas_cumprod)
@@ -209,7 +297,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
         sampling = getattr(library, "sampling")
         return getattr(sampling, scheduler_type)
     
-    def encode_sketchs(self, state, scale_ratio=8, g_strength=1.0, cond=None, uncond=None):
+    def encode_sketchs(self, state, scale_ratio=8, g_strength=1.0, text_ids=None):
+        uncond, cond = text_ids[0], text_ids[1]
+        
         img_state = []
         if state is None:
             return torch.FloatTensor(0)
@@ -233,14 +323,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
             return torch.FloatTensor(0)
             
         w_tensors = dict()
+        cond = cond.tolist()
+        uncond = uncond.tolist()
         for layer in self.unet.down_blocks:
-            c = int(self.tokenizer.model_max_length)
+            c = int(len(cond))
             w, h = img_state[0][1].shape
             w_r, h_r = w // scale_ratio, h // scale_ratio
-            
-            cond_token_lis = cond.tolist()
-            uncond_token_lis = uncond.tolist()
-            
+
             ret_cond_tensor = torch.zeros((1, int(w_r * h_r), c), dtype=torch.float32)
             ret_uncond_tensor = torch.zeros((1, int(w_r * h_r), c), dtype=torch.float32)
 
@@ -254,13 +343,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     align_corners=True,
                 ).squeeze().reshape(-1, 1).repeat(1, len(v_as_tokens))  
                 
-                for idx, tok in enumerate(cond_token_lis):
-                    if cond_token_lis[idx : idx + len(v_as_tokens)] == v_as_tokens:
+                for idx, tok in enumerate(cond):
+                    if cond[idx : idx + len(v_as_tokens)] == v_as_tokens:
                         is_in = 1
                         ret_cond_tensor[0, :, idx : idx + len(v_as_tokens)] += (ret)
                         
-                for idx, tok in enumerate(uncond_token_lis):
-                    if cond_token_lis[idx : idx + len(v_as_tokens)] == v_as_tokens:
+                for idx, tok in enumerate(uncond):
+                    if uncond[idx : idx + len(v_as_tokens)] == v_as_tokens:
                         is_in = 1                      
                         ret_uncond_tensor[0, :, idx : idx + len(v_as_tokens)] += (ret)
 
@@ -338,134 +427,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
             ):
                 return torch.device(module._hf_hook.execution_device)
         return self.device
-
-    def _encode_prompt(
-        self,
-        prompt,
-        device,
-        num_images_per_prompt,
-        do_classifier_free_guidance,
-        negative_prompt,
-    ):
-        r"""
-        Encodes the prompt into text encoder hidden states.
-
-        Args:
-            prompt (`str` or `list(int)`):
-                prompt to be encoded
-            device: (`torch.device`):
-                torch device
-            num_images_per_prompt (`int`):
-                number of images that should be generated per prompt
-            do_classifier_free_guidance (`bool`):
-                whether to use classifier free guidance or not
-            negative_prompt (`str` or `List[str]`):
-                The prompt or prompts not to guide the image generation. Ignored when not using guidance (i.e., ignored
-                if `guidance_scale` is less than `1`).
-        """
-        batch_size = len(prompt) if isinstance(prompt, list) else 1
-
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        text_input_ids = text_inputs.input_ids
-        untruncated_ids = self.tokenizer(
-            prompt, padding="max_length", return_tensors="pt"
-        ).input_ids
-
-        if not torch.equal(text_input_ids, untruncated_ids):
-            removed_text = self.tokenizer.batch_decode(
-                untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
-            )
-            logger.warning(
-                "The following part of your input was truncated because CLIP can only handle sequences up to"
-                f" {self.tokenizer.model_max_length} tokens: {removed_text}"
-            )
-
-        if (
-            hasattr(self.text_encoder.config, "use_attention_mask")
-            and self.text_encoder.config.use_attention_mask
-        ):
-            attention_mask = text_inputs.attention_mask.to(device)
-        else:
-            attention_mask = None
-
-        text_embeddings = self.text_encoder(
-            text_input_ids.to(device),
-            attention_mask=attention_mask,
-        )
-        text_embeddings = text_embeddings[0]
-
-        # duplicate text embeddings for each generation per prompt, using mps friendly method
-        bs_embed, seq_len, _ = text_embeddings.shape
-        text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
-        text_embeddings = text_embeddings.view(
-            bs_embed * num_images_per_prompt, seq_len, -1
-        )
-
-        # get unconditional embeddings for classifier free guidance
-        if do_classifier_free_guidance:
-            uncond_tokens: List[str]
-            if negative_prompt is None:
-                uncond_tokens = [""] * batch_size
-            elif type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
-            elif isinstance(negative_prompt, str):
-                uncond_tokens = [negative_prompt]
-            elif batch_size != len(negative_prompt):
-                raise ValueError(
-                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                    " the batch size of `prompt`."
-                )
-            else:
-                uncond_tokens = negative_prompt
-
-            max_length = text_input_ids.shape[-1]
-            uncond_input = self.tokenizer(
-                uncond_tokens,
-                padding="max_length",
-                max_length=max_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-
-            if (
-                hasattr(self.text_encoder.config, "use_attention_mask")
-                and self.text_encoder.config.use_attention_mask
-            ):
-                attention_mask = uncond_input.attention_mask.to(device)
-            else:
-                attention_mask = None
-
-            uncond_embeddings = self.text_encoder(
-                uncond_input.input_ids.to(device),
-                attention_mask=attention_mask,
-            )
-            uncond_embeddings = uncond_embeddings[0]
-
-            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
-            seq_len = uncond_embeddings.shape[1]
-            uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
-            uncond_embeddings = uncond_embeddings.view(
-                batch_size * num_images_per_prompt, seq_len, -1
-            )
-
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
-            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-
-        return text_embeddings
-
+        
     def decode_latents(self, latents):
+        latents = latents.to(self.device, dtype=self.vae.dtype)
         latents = 1 / 0.18215 * latents
         image = self.vae.decode(latents).sample
         image = (image / 2 + 0.5).clamp(0, 1)
@@ -555,7 +519,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
-        num_images_per_prompt: Optional[int] = 1,
         generator: Optional[torch.Generator] = None,
         image: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
@@ -586,13 +549,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
             raise ValueError("has to use guidance_scale")
 
         # 3. Encode input prompt
-        text_embeddings = self._encode_prompt(
-            prompt,
-            device,
-            num_images_per_prompt,
-            do_classifier_free_guidance,
-            negative_prompt,
-        )
+        text_ids, text_embeddings = self.prompt_parser([negative_prompt, prompt])
+        text_embeddings = text_embeddings.to(self.unet.dtype)
         
         init_timestep = int(num_inference_steps / min(strength, 0.999)) if strength > 0 else 0
         sigmas = self.get_sigmas(init_timestep, sampler_opt).to(
@@ -617,20 +575,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
             latents.device
         )
 
-        text_input = self.tokenizer(
-            [prompt, negative_prompt],
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids
-        
         img_state = self.encode_sketchs(
             pww_state, 
             g_strength=pww_attn_weight,
-            cond=text_input[0],
-            uncond=text_input[1],
-            scale_ratio=scale_ratio,
+            text_ids=text_ids,
         )
         
         def model_fn(x, sigma):
@@ -736,7 +684,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
-        num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[torch.Generator] = None,
         latents: Optional[torch.FloatTensor] = None,
@@ -767,13 +714,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
             raise ValueError("has to use guidance_scale")
 
         # 3. Encode input prompt
-        text_embeddings = self._encode_prompt(
-            prompt,
-            device,
-            num_images_per_prompt,
-            do_classifier_free_guidance,
-            negative_prompt,
-        )
+        text_ids, text_embeddings = self.prompt_parser([negative_prompt, prompt])
+        text_embeddings = text_embeddings.to(self.unet.dtype)
 
         # 4. Prepare timesteps
         sigmas = self.get_sigmas(num_inference_steps, sampler_opt).to(
@@ -783,7 +725,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         # 5. Prepare latent variables
         num_channels_latents = self.unet.in_channels
         latents = self.prepare_latents(
-            batch_size * num_images_per_prompt,
+            batch_size,
             num_channels_latents,
             height,
             width,
@@ -797,20 +739,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
         self.k_diffusion_model.log_sigmas = self.k_diffusion_model.log_sigmas.to(
             latents.device
         )
-
-        text_input = self.tokenizer(
-            [prompt, negative_prompt],
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids
         
         img_state = self.encode_sketchs(
             pww_state, 
             g_strength=pww_attn_weight,
-            cond=text_input[0],
-            uncond=text_input[1],
+            text_ids=text_ids,
         )
 
         def model_fn(x, sigma):
@@ -863,6 +796,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 strength=upscale_denoising_strength,
                 sampler_name=sampler_name,
                 sampler_opt=sampler_opt,
+                pww_state=None,
+                pww_attn_weight=pww_attn_weight/2,
             )
 
         # 8. Post-processing
