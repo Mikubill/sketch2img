@@ -350,7 +350,10 @@ def add_net(files: list[tempfile._TemporaryFileWrapper], ti_state, lora_state):
     for file in files:
         item = Path(file.name)
         stripedname = str(item.stem).strip()
-        state_dict = torch.load(file.name, map_location="cpu")
+        if item.suffix == ".pt":
+            state_dict = torch.load(file.name, map_location="cpu")
+        else:
+            state_dict = load_file(file.name, device="cpu")
         if any("lora" in k for k in state_dict.keys()):
             lora_state = file.name
         else:

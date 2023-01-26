@@ -1,6 +1,7 @@
 import importlib
 import inspect
 import math
+from pathlib import Path
 import re
 from collections import defaultdict
 from typing import List, Optional, Union
@@ -21,7 +22,8 @@ from diffusers import DiffusionPipeline
 from diffusers.utils import PIL_INTERPOLATION, is_accelerate_available
 from diffusers.utils import logging, randn_tensor
 
-import modules.safe
+import modules.safe as _
+from safetensors.torch import load_file
 
 xformers_available = False
 try: 
@@ -66,7 +68,10 @@ def get_attention_scores(attn, query, key, attention_mask=None):
     
 def load_lora_attn_procs(model_file, unet, scale=1.0):
         
-        state_dict = torch.load(model_file, map_location="cpu")
+        if Path(model_file).suffix == ".pt":
+            state_dict = torch.load(model_file, map_location="cpu")
+        else:
+            state_dict = load_file(model_file, device="cpu")
         
         # 'lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight'
         # 'down_blocks.0.attentions.0.transformer_blocks.0.attn1.processor.to_q_lora.down.weight'
