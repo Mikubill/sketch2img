@@ -139,7 +139,7 @@ def restore_all():
     global te_base_weight, tokenizer
     text_encoder.get_input_embeddings().weight.data = te_base_weight
     tokenizer = CLIPTokenizer.from_pretrained(
-        "/root/workspace/storage/models/orangemix",
+        base_model,
         subfolder="tokenizer",
         torch_dtype=torch.float16,
     )
