@@ -63,7 +63,8 @@ scheduler = DDIMScheduler.from_pretrained(
     subfolder="scheduler",
 )
 vae = AutoencoderKL.from_pretrained(
-    "stabilityai/sd-vae-ft-ema", torch_dtype=torch.float32
+    "stabilityai/sd-vae-ft-ema", 
+    torch_dtype=torch.float16
 )
 text_encoder = CLIPTextModel.from_pretrained(
     base_model,
@@ -339,18 +340,20 @@ def apply_canvas(selected, draw, state, w, h):
 
 
 def apply_weight(selected, weight, state):
-    state[selected]["weight"] = weight
+    if selected in state:
+        state[selected]["weight"] = weight
     return state
 
 
 def apply_option(selected, mask, state):
-    state[selected]["mask_outsides"] = mask
+    if selected in state:
+        state[selected]["mask_outsides"] = mask
     return state
 
 
 # sp2, radio, width, height, global_stats
 def apply_image(image, selected, w, h, strgength, mask, state):
-    if selected is not None:
+    if selected in state:
         state[selected] = {
             "map": resize(image, w, h), 
             "weight": strgength, 
