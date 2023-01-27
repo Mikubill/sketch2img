@@ -45,16 +45,8 @@ samplers_k_diffusion = [
     ("DPM fast", "sample_dpm_fast", {}),
     ("DPM adaptive", "sample_dpm_adaptive", {}),
     ("LMS Karras", "sample_lms", {"scheduler": "karras"}),
-    (
-        "DPM2 Karras",
-        "sample_dpm_2",
-        {"scheduler": "karras", "discard_next_to_last_sigma": True},
-    ),
-    (
-        "DPM2 a Karras",
-        "sample_dpm_2_ancestral",
-        {"scheduler": "karras", "discard_next_to_last_sigma": True},
-    ),
+    ("DPM2 Karras", "sample_dpm_2", {"scheduler": "karras", "discard_next_to_last_sigma": True}),
+    ("DPM2 a Karras", "sample_dpm_2_ancestral", {"scheduler": "karras", "discard_next_to_last_sigma": True}),
     ("DPM++ 2S a Karras", "sample_dpmpp_2s_ancestral", {"scheduler": "karras"}),
     ("DPM++ 2M Karras", "sample_dpmpp_2m", {"scheduler": "karras"}),
     ("DPM++ SDE Karras", "sample_dpmpp_sde", {"scheduler": "karras"}),

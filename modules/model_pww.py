@@ -75,10 +75,8 @@ def load_lora_attn_procs(model_file, unet, scale=1.0):
     else:
         state_dict = load_file(model_file, device="cpu")
 
-    # 'lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight'
-    # 'down_blocks.0.attentions.0.transformer_blocks.0.attn1.processor.to_q_lora.down.weight'
     if any("lora_unet_down_blocks" in k for k in state_dict.keys()):
-        # extract ldm format lora
+        # convert ldm format lora
         df_lora = {}
         attn_numlayer = re.compile(r"_attn(\d)_to_([qkv]|out).lora_")
         alpha_numlayer = re.compile(r"_attn(\d)_to_([qkv]|out).alpha")
