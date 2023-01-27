@@ -770,4 +770,4 @@ with gr.Blocks(css=css) as demo:
 
 print(f"Space built in {time.time() - start_time:.2f} seconds")
 # demo.launch(share=True)
-demo.launch(share=True, enable_queue=True)
+demo.launch()
