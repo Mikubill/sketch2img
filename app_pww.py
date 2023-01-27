@@ -208,13 +208,15 @@ def inference(
     global pipe, unet, tokenizer, text_encoder
     if seed is None or seed == 0:
         seed = random.randint(0, 2147483647)
+        
+    restore_all()
     generator = torch.Generator("cuda").manual_seed(int(seed))
 
     local_unet, local_lora = get_model(model)
     if lora_state is not None and lora_state != "":
         local_lora.load(lora_state, lora_scale)
         local_lora.to(local_unet.device, dtype=local_unet.dtype)
-
+    
     pipe.setup_unet(local_unet)
     sampler_name, sampler_opt = None, None
     for label, funcname, options in samplers_k_diffusion:
