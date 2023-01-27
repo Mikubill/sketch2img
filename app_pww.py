@@ -102,9 +102,9 @@ def get_model_list():
             model_available.append(model)
     return model_available
 
-
-unet_cache = dict()
-
+unet_cache = {
+    base_name: unet
+}
 
 def get_model(name):
     keys = [k[0] for k in models]
@@ -334,8 +334,9 @@ def switch_canvas(entry, state, width, height):
 
 
 def apply_canvas(selected, draw, state, w, h):
-    w, h = int(w), int(h)
-    state[selected]["map"] = resize(draw, w, h)
+    if selected in state:
+        w, h = int(w), int(h)
+        state[selected]["map"] = resize(draw, w, h)
     return state, gr.Image.update(value=create_mixed_img(selected, state, w, h))
 
 
