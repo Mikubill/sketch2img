@@ -9,7 +9,9 @@ Currently supported method:
 
 ## paint-with-words
 
-Paint-with-words is a method proposed by researchers from NVIDIA that allows users to control the location of objects by selecting phrases and painting them on the canvas. The user-specified masks increase the value of corresponding entries of the attention matrix in the cross-attention layers. ([Paper](https://arxiv.org/abs/2211.01324))
+[Paper](https://arxiv.org/abs/2211.01324) | [Demo](https://huggingface.co/spaces/nyanko7/sd-diffusers-webui)
+
+Paint-with-words is a method proposed by researchers from NVIDIA that allows users to control the location of objects by selecting phrases and painting them on the canvas. The user-specified masks increase the value of corresponding entries of the attention matrix in the cross-attention layers. 
 
 Inspired by this method, we created a simple a1111-style sketching UI that allows multi-mask input to address same area on different tokens. Also, textual-inversion and LoRA support are fully functional*, you can add them to the generation process and adjust the strength and area they are applied to.
 
