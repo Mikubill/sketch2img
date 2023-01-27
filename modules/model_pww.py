@@ -367,8 +367,12 @@ class StableDiffusionPipeline(DiffusionPipeline):
             ).input_ids
 
             dotmap = v["map"] < 255
+            out = dotmap.astype(float)
+            if v["mask_outsides"]:
+                out[out==0] = -1
+                
             arr = torch.from_numpy(
-                dotmap.astype(float) * float(v["weight"]) * g_strength
+                out * float(v["weight"]) * g_strength
             )
             img_state.append((v_input, arr))
 

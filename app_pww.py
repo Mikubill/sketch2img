@@ -292,11 +292,13 @@ def detect_text(text, state, width, height):
             new_state[item] = {
                 "map": state[item]["map"],
                 "weight": state[item]["weight"],
+                "mask_outsides": state[item]["weight"],
             }
         else:
             new_state[item] = {
                 "map": None,
                 "weight": 0.5,
+                "mask_outsides": False
             }
     update = gr.Radio.update(choices=[key for key in new_state.keys()], value=None)
     update_img = gr.update(value=create_mixed_img("", new_state, width, height))
@@ -319,9 +321,11 @@ def resize(img, w, h):
 def switch_canvas(entry, state, width, height):
     if entry == None:
         return None, 0.5, create_mixed_img("", state, width, height)
+
     return (
         gr.update(value=None, interactive=True),
-        gr.update(value=state[entry]["weight"]),
+        gr.update(value=state[entry]["weight"] if entry in state else 0.5),
+        gr.update(value=state[entry]["mask_outsides"] if entry in state else False),
         create_mixed_img(entry, state, width, height),
     )
 
@@ -337,10 +341,20 @@ def apply_weight(selected, weight, state):
     return state
 
 
+def apply_option(selected, mask, state):
+    state[selected]["mask_outsides"] = mask
+    return state
+
+
 # sp2, radio, width, height, global_stats
-def apply_image(image, selected, w, h, strgength, state):
+def apply_image(image, selected, w, h, strgength, mask, state):
     if selected is not None:
-        state[selected] = {"map": resize(image, w, h), "weight": strgength}
+        state[selected] = {
+            "map": resize(image, w, h), 
+            "weight": strgength, 
+            "mask_outsides": mask
+        }
+        
     return state, gr.Image.update(value=create_mixed_img(selected, state, w, h))
 
 
@@ -675,6 +689,11 @@ with gr.Blocks(css=css) as demo:
                     interactive=False,
                 )
 
+                mask_outsides = gr.Checkbox(
+                    label="Mask other areas", 
+                    value=False
+                )
+
                 strength = gr.Slider(
                     label="Token strength",
                     minimum=0,
@@ -682,6 +701,7 @@ with gr.Blocks(css=css) as demo:
                     step=0.01,
                     value=0.5,
                 )
+                
 
                 sk_update.click(
                     detect_text,
@@ -691,7 +711,7 @@ with gr.Blocks(css=css) as demo:
                 radio.change(
                     switch_canvas,
                     inputs=[radio, global_stats, width, height],
-                    outputs=[sp, strength, rendered],
+                    outputs=[sp, strength, mask_outsides, rendered],
                 )
                 sp.edit(
                     apply_canvas,
@@ -703,6 +723,11 @@ with gr.Blocks(css=css) as demo:
                     inputs=[radio, strength, global_stats],
                     outputs=[global_stats],
                 )
+                mask_outsides.change(
+                    apply_option,
+                    inputs=[radio, mask_outsides, global_stats],
+                    outputs=[global_stats],
+                )
 
             with gr.Tab("UploadFile"):
 
@@ -710,6 +735,11 @@ with gr.Blocks(css=css) as demo:
                     image_mode="L",
                     source="upload",
                     shape=(512, 512),
+                )
+                
+                mask_outsides2 = gr.Checkbox(
+                    label="Mask other areas", 
+                    value=False
                 )
 
                 strength2 = gr.Slider(
@@ -723,7 +753,7 @@ with gr.Blocks(css=css) as demo:
                 apply_style = gr.Button(value="Apply")
                 apply_style.click(
                     apply_image,
-                    inputs=[sp2, radio, width, height, strength2, global_stats],
+                    inputs=[sp2, radio, width, height, strength2, mask_outsides2, global_stats],
                     outputs=[global_stats, rendered],
                 )
 
