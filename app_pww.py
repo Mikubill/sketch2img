@@ -469,7 +469,7 @@ with gr.Blocks(css=css) as demo:
 
                         prompt = gr.Textbox(
                             label="Prompt",
-                            value="loli cat girl, blue eyes, flat chest, solo, long messy silver hair, blue capelet, garden, cat ears, cat tail, upper body",
+                            value="loli cat girl, blue eyes, flat chest, solo, long messy silver hair, blue capelet, cat ears, cat tail, upper body",
                             show_label=True,
                             max_lines=4,
                             placeholder="Enter prompt.",
