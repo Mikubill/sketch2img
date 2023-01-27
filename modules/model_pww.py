@@ -68,79 +68,6 @@ def get_attention_scores(attn, query, key, attention_mask=None):
     return attention_scores
 
 
-def load_lora_attn_procs(model_file, unet, scale=1.0):
-
-    if Path(model_file).suffix == ".pt":
-        state_dict = torch.load(model_file, map_location="cpu")
-    else:
-        state_dict = load_file(model_file, device="cpu")
-
-    if any("lora_unet_down_blocks" in k for k in state_dict.keys()):
-        # convert ldm format lora
-        df_lora = {}
-        attn_numlayer = re.compile(r"_attn(\d)_to_([qkv]|out).lora_")
-        alpha_numlayer = re.compile(r"_attn(\d)_to_([qkv]|out).alpha")
-        for k, v in state_dict.items():
-            if "attn" not in k or "lora_te" in k:
-                # currently not support: ff, clip-attn
-                continue
-            k = k.replace("lora_unet_down_blocks_", "down_blocks.")
-            k = k.replace("lora_unet_up_blocks_", "up_blocks.")
-            k = k.replace("lora_unet_mid_block_", "mid_block_")
-            k = k.replace("_attentions_", ".attentions.")
-            k = k.replace("_transformer_blocks_", ".transformer_blocks.")
-            k = k.replace("to_out_0", "to_out")
-            k = attn_numlayer.sub(r".attn\1.processor.to_\2_lora.", k)
-            k = alpha_numlayer.sub(r".attn\1.processor.to_\2_lora.alpha", k)
-            df_lora[k] = v
-        state_dict = df_lora
-
-    # fill attn processors
-    attn_processors = {}
-
-    is_lora = all("lora" in k for k in state_dict.keys())
-
-    if is_lora:
-        lora_grouped_dict = defaultdict(dict)
-        for key, value in state_dict.items():
-            if "alpha" in key:
-                attn_processor_key, sub_key = ".".join(key.split(".")[:-2]), ".".join(
-                    key.split(".")[-2:]
-                )
-            else:
-                attn_processor_key, sub_key = ".".join(key.split(".")[:-3]), ".".join(
-                    key.split(".")[-3:]
-                )
-            lora_grouped_dict[attn_processor_key][sub_key] = value
-
-        for key, value_dict in lora_grouped_dict.items():
-            rank = value_dict["to_k_lora.down.weight"].shape[0]
-            cross_attention_dim = value_dict["to_k_lora.down.weight"].shape[1]
-            hidden_size = value_dict["to_k_lora.up.weight"].shape[0]
-
-            attn_processors[key] = LoRACrossAttnProcessor(
-                hidden_size=hidden_size,
-                cross_attention_dim=cross_attention_dim,
-                rank=rank,
-                scale=scale,
-            )
-            attn_processors[key].load_state_dict(value_dict, strict=False)
-
-    else:
-        raise ValueError(
-            f"{model_file} does not seem to be in the correct format expected by LoRA training."
-        )
-
-    # set correct dtype & device
-    attn_processors = {
-        k: v.to(device=unet.device, dtype=unet.dtype)
-        for k, v in attn_processors.items()
-    }
-
-    # set layers
-    unet.set_attn_processor(attn_processors)
-
-
 class CrossAttnProcessor(nn.Module):
     def __call__(
         self,
@@ -148,7 +75,6 @@ class CrossAttnProcessor(nn.Module):
         hidden_states,
         encoder_hidden_states=None,
         attention_mask=None,
-        qkvo_bias=None,
     ):
         batch_size, sequence_length, _ = hidden_states.shape
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)
@@ -165,11 +91,6 @@ class CrossAttnProcessor(nn.Module):
         query = attn.to_q(hidden_states)
         key = attn.to_k(encoder_states)
         value = attn.to_v(encoder_states)
-
-        if qkvo_bias is not None:
-            query += qkvo_bias["q"](hidden_states)
-            key += qkvo_bias["k"](encoder_states)
-            value += qkvo_bias["v"](encoder_states)
 
         query = attn.head_to_batch_dim(query)
         key = attn.head_to_batch_dim(key)
@@ -219,75 +140,10 @@ class CrossAttnProcessor(nn.Module):
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
 
-        if qkvo_bias is not None:
-            hidden_states += qkvo_bias["o"](hidden_states)
-
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
 
         return hidden_states
-
-
-class LoRACrossAttnProcessor(CrossAttnProcessor):
-    def __init__(self, hidden_size, cross_attention_dim=None, rank=4, scale=1.0):
-        super().__init__()
-
-        self.to_q_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
-        self.to_k_lora = LoRALinearLayer(
-            cross_attention_dim or hidden_size, hidden_size, rank
-        )
-        self.to_v_lora = LoRALinearLayer(
-            cross_attention_dim or hidden_size, hidden_size, rank
-        )
-        self.to_out_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
-        self.scale = scale
-
-    def __call__(
-        self,
-        attn,
-        hidden_states,
-        encoder_hidden_states=None,
-        attention_mask=None,
-    ):
-        scale = self.scale
-        qkvo_bias = {
-            "q": lambda inputs: scale * self.to_q_lora(inputs),
-            "k": lambda inputs: scale * self.to_k_lora(inputs),
-            "v": lambda inputs: scale * self.to_v_lora(inputs),
-            "o": lambda inputs: scale * self.to_out_lora(inputs),
-        }
-        return super().__call__(
-            attn, hidden_states, encoder_hidden_states, attention_mask, qkvo_bias
-        )
-
-
-class LoRALinearLayer(nn.Module):
-    def __init__(self, in_features, out_features, rank=4):
-        super().__init__()
-
-        if rank > min(in_features, out_features):
-            raise ValueError(
-                f"LoRA rank {rank} must be less or equal than {min(in_features, out_features)}"
-            )
-
-        self.down = nn.Linear(in_features, rank, bias=False)
-        self.up = nn.Linear(rank, out_features, bias=False)
-        self.scale = 1.0
-        self.alpha = rank
-
-        nn.init.normal_(self.down.weight, std=1 / rank)
-        nn.init.zeros_(self.up.weight)
-
-    def forward(self, hidden_states):
-        orig_dtype = hidden_states.dtype
-        dtype = self.down.weight.dtype
-        rank = self.down.out_features
-
-        down_hidden_states = self.down(hidden_states.to(dtype))
-        up_hidden_states = self.up(down_hidden_states) * (self.alpha / rank)
-
-        return up_hidden_states.to(orig_dtype)
-
 
 class ModelWrapper:
     def __init__(self, model, alphas_cumprod):

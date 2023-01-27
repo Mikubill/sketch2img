@@ -14,7 +14,6 @@ from diffusers import (
 from modules.model_pww import (
     CrossAttnProcessor,
     StableDiffusionPipeline,
-    load_lora_attn_procs,
 )
 from torchvision import transforms
 from transformers import CLIPTokenizer, CLIPTextModel
@@ -22,6 +21,7 @@ from PIL import Image
 from pathlib import Path
 from safetensors.torch import load_file
 import modules.safe as _
+from modules.lora import LoRANetwork
 
 models = [
     ("AbyssOrangeMix_Base", "/root/workspace/storage/models/orangemix"),
@@ -106,6 +106,10 @@ unet_cache = {
     base_name: unet
 }
 
+lora_cache = {
+    base_name: LoRANetwork(text_encoder, unet)
+}
+
 def get_model(name):
     keys = [k[0] for k in models]
     if name not in unet_cache:
@@ -118,10 +122,13 @@ def get_model(name):
                 torch_dtype=torch.float16,
             )
             unet_cache[name] = unet
+            lora_cache[name] = LoRANetwork(text_encoder, unet)
 
     g_unet = unet_cache[name]
-    g_unet.set_attn_processor(None)
-    return g_unet
+    g_lora = lora_cache[name]
+    g_unet.set_attn_processor(CrossAttnProcessor())
+    g_lora.reset()
+    return g_unet, g_lora
 
 def error_str(error, title="Error"):
     return (
@@ -172,11 +179,10 @@ def inference(
         seed = random.randint(0, 2147483647)
     generator = torch.Generator("cuda").manual_seed(int(seed))
 
-    local_unet = get_model(model)
+    local_unet, local_lora = get_model(model)
     if lora_state is not None and lora_state != "":
-        load_lora_attn_procs(lora_state, local_unet, lora_scale)
-    else:
-        local_unet.set_attn_processor(CrossAttnProcessor())
+        local_lora.load(lora_state, lora_scale)
+        local_lora.to(local_unet.device, dtype=local_unet.dtype)
 
     pipe.setup_unet(local_unet)
     sampler_name, sampler_opt = None, None
