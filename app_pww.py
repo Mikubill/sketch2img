@@ -295,7 +295,7 @@ def detect_text(text, state, width, height):
             new_state[item] = {
                 "map": state[item]["map"],
                 "weight": state[item]["weight"],
-                "mask_outsides": state[item]["weight"],
+                "mask_outsides": state[item]["mask_outsides"],
             }
         else:
             new_state[item] = {
@@ -365,7 +365,7 @@ def apply_image(image, selected, w, h, strgength, mask, state):
 
 
 # [ti_state, lora_state, ti_vals, lora_vals, uploads]
-def add_net(files: list[tempfile._TemporaryFileWrapper], ti_state, lora_state):
+def add_net(files, ti_state, lora_state):
     if files is None:
         return ti_state, "", lora_state, None
 
