@@ -9,7 +9,7 @@ Currently supported method:
 
 ## paint-with-words
 
-1. Set your model path in https://github.com/Mikubill/sketch2img/blob/8e2c8c0b94aaf2e2d1cdaeb6b85438d112d5cad8/app_pww.py#L26-L33
+1. Set your model path in https://github.com/Mikubill/sketch2img/blob/eb886f1f6cbcc92fa58fc519fa0466cb50b05e55/app_pww.py#L26-L33
 2. `python app_pww.py`
 
 Some samples
