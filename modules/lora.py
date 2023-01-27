@@ -126,7 +126,6 @@ class LoRANetwork(torch.nn.Module):
         for lora in self.text_encoder_loras + self.unet_loras:
             assert (lora.lora_name not in names), f"duplicated lora name: {lora.lora_name}"
             names.add(lora.lora_name)
-            print(lora.lora_name)
             
             lora.apply()
             self.add_module(lora.lora_name, lora)
