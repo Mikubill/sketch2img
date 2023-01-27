@@ -29,7 +29,7 @@ models = [
     ("AnimeSFW", "/root/workspace/animesfw"),
 ]
 
-base_model, base_name = models[0]
+base_name, base_model = models[0]
 clip_skip = 1
 
 samplers_k_diffusion = [
@@ -42,8 +42,6 @@ samplers_k_diffusion = [
     ("DPM++ 2S a", "sample_dpmpp_2s_ancestral", {}),
     ("DPM++ 2M", "sample_dpmpp_2m", {}),
     ("DPM++ SDE", "sample_dpmpp_sde", {}),
-    ("DPM fast", "sample_dpm_fast", {}),
-    ("DPM adaptive", "sample_dpm_adaptive", {}),
     ("LMS Karras", "sample_lms", {"scheduler": "karras"}),
     ("DPM2 Karras", "sample_dpm_2", {"scheduler": "karras", "discard_next_to_last_sigma": True}),
     ("DPM2 a Karras", "sample_dpm_2_ancestral", {"scheduler": "karras", "discard_next_to_last_sigma": True}),
@@ -51,6 +49,12 @@ samplers_k_diffusion = [
     ("DPM++ 2M Karras", "sample_dpmpp_2m", {"scheduler": "karras"}),
     ("DPM++ SDE Karras", "sample_dpmpp_sde", {"scheduler": "karras"}),
 ]
+
+# samplers_diffusers = [
+#     ("DDIMScheduler", "diffusers.schedulers.DDIMScheduler", {})
+#     ("DDPMScheduler", "diffusers.schedulers.DDPMScheduler", {})
+#     ("DEISMultistepScheduler", "diffusers.schedulers.DEISMultistepScheduler", {})
+# ]
 
 start_time = time.time()
 
