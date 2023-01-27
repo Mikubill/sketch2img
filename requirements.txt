@@ -1,0 +1,8 @@
+torch
+einops
+diffusers
+transformers
+k_diffusion
+safetensors
+gradio
+torch
