@@ -1,4 +1,6 @@
 import random
+import re
+import string
 import tempfile
 import time
 import gradio as gr
@@ -121,8 +123,11 @@ def get_model(name):
                 subfolder="unet",
                 torch_dtype=torch.float16,
             )
+            if torch.cuda.is_available():
+                unet.to("cuda")
+                
             unet_cache[name] = unet
-            lora_cache[name] = LoRANetwork(text_encoder, unet)
+            lora_cache[name] = LoRANetwork(lora_cache[base_name].text_encoder_loras, unet)
 
     g_unet = unet_cache[name]
     g_lora = lora_cache[name]
@@ -138,13 +143,39 @@ def error_str(error, title="Error"):
         else ""
     )
 
+te_base_weight_length = text_encoder.get_input_embeddings().weight.data.shape[0]
+original_prepare_for_tokenization = tokenizer.prepare_for_tokenization
 
-te_base_weight = text_encoder.get_input_embeddings().weight.data.detach().clone()
+def make_token_names(embs):
+    all_tokens = []
+    for name, vec in embs.items():
+        tokens = [f'emb-{name}-{i}' for i in range(len(vec))]
+        all_tokens.append(tokens)
+    return all_tokens
 
+def setup_tokenizer(embs):
+    reg_match = [re.compile(fr"(?:^|(?<=\s|,)){k}(?=,|\s|$)") for k in embs.keys()]
+    clip_keywords = [' '.join(s) for s in make_token_names(embs)]
+
+    def parse_prompt(prompt: str):
+        for m, v in zip(reg_match, clip_keywords):
+            prompt = m.sub(v, prompt)
+        return prompt
+        
+    def prepare_for_tokenization(self, text: str, is_split_into_words: bool = False, **kwargs):
+        text = parse_prompt(text)
+        r = original_prepare_for_tokenization(text, is_split_into_words, **kwargs)
+        return r
+
+    tokenizer.prepare_for_tokenization = prepare_for_tokenization.__get__(tokenizer, CLIPTokenizer)
+    return [t for sublist in make_token_names(embs) for t in sublist]
 
 def restore_all():
     global te_base_weight, tokenizer
-    text_encoder.get_input_embeddings().weight.data = te_base_weight
+    tokenizer.prepare_for_tokenization = original_prepare_for_tokenization
+    
+    embeddings = text_encoder.get_input_embeddings()
+    text_encoder.get_input_embeddings().weight.data = embeddings.weight.data[:te_base_weight_length]
     tokenizer = CLIPTokenizer.from_pretrained(
         base_model,
         subfolder="tokenizer",
@@ -192,22 +223,23 @@ def inference(
 
     if embs is not None and len(embs) > 0:
         delta_weight = []
+        ti_embs = {}
         for name, file in embs.items():
             if str(file).endswith(".pt"):
                 loaded_learned_embeds = torch.load(file, map_location="cpu")
             else:
                 loaded_learned_embeds = load_file(file, device="cpu")
             loaded_learned_embeds = loaded_learned_embeds["string_to_param"]["*"]
-            added_length = tokenizer.add_tokens(name)
-
-            assert added_length == loaded_learned_embeds.shape[0]
-            delta_weight.append(loaded_learned_embeds)
-
-        delta_weight = torch.cat(delta_weight, dim=0)
-        text_encoder.resize_token_embeddings(len(tokenizer))
-        text_encoder.get_input_embeddings().weight.data[
-            -delta_weight.shape[0] :
-        ] = delta_weight
+            ti_embs[name] = loaded_learned_embeds
+            
+        if len(ti_embs) > 0:
+            tokens = setup_tokenizer(ti_embs)
+            added_tokens = tokenizer.add_tokens(tokens)
+            delta_weight = torch.cat([val for val in ti_embs.values()], dim=0)
+            
+            assert added_tokens == delta_weight.shape[0]
+            text_encoder.resize_token_embeddings(len(tokenizer))
+            text_encoder.get_input_embeddings().weight.data[-delta_weight.shape[0]:] = delta_weight
 
     config = {
         "negative_prompt": neg_prompt,
@@ -368,7 +400,6 @@ def apply_image(image, selected, w, h, strgength, mask, state):
         }
         
     return state, gr.Image.update(value=create_mixed_img(selected, state, w, h))
-
 
 # [ti_state, lora_state, ti_vals, lora_vals, uploads]
 def add_net(files, ti_state, lora_state):

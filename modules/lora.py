@@ -70,9 +70,10 @@ class LoRAModule(torch.nn.Module):
             self.lora_up = torch.nn.Linear(rank, out_dim, bias=False)
         
     def apply(self):
-        self.org_forward = self.org_module.forward
-        self.org_module.forward = self.forward
-        del self.org_module
+        if hasattr(self, "org_module"):
+            self.org_forward = self.org_module.forward
+            self.org_module.forward = self.forward
+            del self.org_module
 
     def forward(self, x):
         if self.enable:
@@ -96,25 +97,23 @@ class LoRANetwork(torch.nn.Module):
         self.alpha = alpha
 
         # create module instances
-        def create_modules(
-            prefix, root_module: torch.nn.Module, target_replace_modules
-        ) -> list[LoRAModule]:
+        def create_modules(prefix, root_module: torch.nn.Module, target_replace_modules):
             loras = []
             for name, module in root_module.named_modules():
                 if module.__class__.__name__ in target_replace_modules:
                     for child_name, child_module in module.named_modules():
-                        if child_module.__class__.__name__ == "Linear" or (
-                            child_module.__class__.__name__ == "Conv2d"
-                            and child_module.kernel_size == (1, 1)
-                        ):
+                        if child_module.__class__.__name__ == "Linear" or (child_module.__class__.__name__ == "Conv2d" and child_module.kernel_size == (1, 1)):
                             lora_name = prefix + "." + name + "." + child_name
                             lora_name = lora_name.replace(".", "_")
                             lora = LoRAModule(lora_name, child_module, self.multiplier, self.lora_dim, self.alpha,)
                             loras.append(lora)
             return loras
 
-        self.text_encoder_loras = create_modules(LoRANetwork.LORA_PREFIX_TEXT_ENCODER, text_encoder, LoRANetwork.TEXT_ENCODER_TARGET_REPLACE_MODULE)
-        print(f"Create LoRA for Text Encoder: {len(self.text_encoder_loras)} modules.")
+        if isinstance(text_encoder, list):
+            self.text_encoder_loras = text_encoder
+        else:
+            self.text_encoder_loras = create_modules(LoRANetwork.LORA_PREFIX_TEXT_ENCODER, text_encoder, LoRANetwork.TEXT_ENCODER_TARGET_REPLACE_MODULE)
+            print(f"Create LoRA for Text Encoder: {len(self.text_encoder_loras)} modules.")
 
         self.unet_loras = create_modules(LoRANetwork.LORA_PREFIX_UNET, unet, LoRANetwork.UNET_TARGET_REPLACE_MODULE)
         print(f"Create LoRA for U-Net: {len(self.unet_loras)} modules.")
