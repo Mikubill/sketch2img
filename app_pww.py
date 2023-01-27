@@ -122,7 +122,6 @@ def get_model(name):
     g_unet.set_attn_processor(None)
     return g_unet
 
-
 def error_str(error, title="Error"):
     return (
         f"""#### {title}
@@ -280,6 +279,9 @@ def apply_new_res(w, h, state):
 
 
 def detect_text(text, state, width, height):
+    
+    if text is None or text == "":
+        return None, None, None, None
 
     t = text.split(",")
     new_state = {}
