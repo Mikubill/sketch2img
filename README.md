@@ -9,10 +9,16 @@ Currently supported method:
 
 ## paint-with-words
 
+Paint-with-words is a method proposed by researchers from NVIDIA that allows users to control the location of objects by selecting phrases and painting them on the canvas. The user-specified masks increase the value of corresponding entries of the attention matrix in the cross-attention layers. ([Paper](https://arxiv.org/abs/2211.01324))
+
+Inspired by this method, we created a simple a1111-style sketching UI that allows multi-mask input to address same area on different tokens. Also, textual-textual inversion and LoRA support are fully functional*, you can add them to the generation process and adjust the strength and area they are applied to.
+
+**Config and Run**
+
 1. Set your model path in https://github.com/Mikubill/sketch2img/blob/eb886f1f6cbcc92fa58fc519fa0466cb50b05e55/app_pww.py#L26-L33
 2. `python app_pww.py`
 
-Some samples
+**Some samples**
 
 | Sketch | Image |
 |:-------------------------:|:-------------------------:|
