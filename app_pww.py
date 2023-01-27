@@ -11,7 +11,11 @@ from diffusers import (
     DDIMScheduler,
     UNet2DConditionModel,
 )
-from modules.model_pww import CrossAttnProcessor, StableDiffusionPipeline, load_lora_attn_procs
+from modules.model_pww import (
+    CrossAttnProcessor,
+    StableDiffusionPipeline,
+    load_lora_attn_procs,
+)
 from torchvision import transforms
 from transformers import CLIPTokenizer, CLIPTextModel
 from PIL import Image
@@ -21,13 +25,12 @@ import modules.safe as _
 
 models = [
     ("AbyssOrangeMix_Base", "/root/workspace/storage/models/orangemix"),
-    ("AbyssOrangeMix2", "/root/models/AbyssOrangeMix2"),
     ("Stable Diffuison 1.5", "/root/models/stable-diffusion-v1-5"),
     ("AnimeSFW", "/root/workspace/animesfw"),
 ]
 
-base_name = "AbyssOrangeMix_Base"
-base_model = "/root/workspace/storage/models/orangemix"
+base_model, base_name = models[0]
+clip_skip = 1
 
 samplers_k_diffusion = [
     ("Euler a", "sample_euler_ancestral", {}),
@@ -64,8 +67,7 @@ scheduler = DDIMScheduler.from_pretrained(
     subfolder="scheduler",
 )
 vae = AutoencoderKL.from_pretrained(
-    "stabilityai/sd-vae-ft-ema", 
-    torch_dtype=torch.float32
+    "stabilityai/sd-vae-ft-ema", torch_dtype=torch.float32
 )
 text_encoder = CLIPTextModel.from_pretrained(
     base_model,
@@ -91,9 +93,11 @@ pipe = StableDiffusionPipeline(
 )
 
 unet.set_attn_processor(CrossAttnProcessor)
+pipe.set_clip_skip(clip_skip)
 if torch.cuda.is_available():
     pipe = pipe.to("cuda")
-    
+
+
 def get_model_list():
     model_available = []
     for model in models:
@@ -117,7 +121,7 @@ def get_model(name):
                 torch_dtype=torch.float16,
             )
             unet_cache[name] = unet
-    
+
     g_unet = unet_cache[name]
     g_unet.set_attn_processor(None)
     return g_unet
@@ -171,7 +175,7 @@ def inference(
     if seed is None or seed == 0:
         seed = random.randint(0, 2147483647)
     generator = torch.Generator("cuda").manual_seed(int(seed))
-    
+
     local_unet = get_model(model)
     if lora_state is not None and lora_state != "":
         load_lora_attn_procs(lora_state, local_unet, lora_scale)
@@ -193,13 +197,15 @@ def inference(
                 loaded_learned_embeds = load_file(file, device="cpu")
             loaded_learned_embeds = loaded_learned_embeds["string_to_param"]["*"]
             added_length = tokenizer.add_tokens(name)
-            
+
             assert added_length == loaded_learned_embeds.shape[0]
             delta_weight.append(loaded_learned_embeds)
 
         delta_weight = torch.cat(delta_weight, dim=0)
         text_encoder.resize_token_embeddings(len(tokenizer))
-        text_encoder.get_input_embeddings().weight.data[-delta_weight.shape[0]:] = delta_weight
+        text_encoder.get_input_embeddings().weight.data[
+            -delta_weight.shape[0] :
+        ] = delta_weight
 
     config = {
         "negative_prompt": neg_prompt,
@@ -359,11 +365,24 @@ def add_net(files: list[tempfile._TemporaryFileWrapper], ti_state, lora_state):
         else:
             ti_state[stripedname] = file.name
 
-    return ti_state, lora_state, gr.Text.update(f"{[key for key in ti_state.keys()]}"), gr.Text.update(f"{lora_state}"), gr.Files.update(value=None)
+    return (
+        ti_state,
+        lora_state,
+        gr.Text.update(f"{[key for key in ti_state.keys()]}"),
+        gr.Text.update(f"{lora_state}"),
+        gr.Files.update(value=None),
+    )
+
 
 # [ti_state, lora_state, ti_vals, lora_vals, uploads]
 def clean_states(ti_state, lora_state):
-    return dict(), None, gr.Text.update(f""), gr.Text.update(f""), gr.File.update(value=None)
+    return (
+        dict(),
+        None,
+        gr.Text.update(f""),
+        gr.Text.update(f""),
+        gr.File.update(value=None),
+    )
 
 
 latent_upscale_modes = {
@@ -567,15 +586,15 @@ with gr.Blocks(css=css) as demo:
                     with gr.Row():
                         with gr.Column(scale=90):
                             ti_vals = gr.Text(label="Loaded embeddings")
-                        
+
                     with gr.Row():
                         with gr.Column(scale=90):
                             lora_vals = gr.Text(label="Loaded loras")
 
                 with gr.Row():
-                        
+
                     uploads = gr.Files(label="Upload new embeddings/lora")
-                    
+
                     with gr.Column():
                         lora_scale = gr.Slider(
                             label="Lora scale",
@@ -586,12 +605,16 @@ with gr.Blocks(css=css) as demo:
                         )
                         btn = gr.Button(value="Upload")
                         btn_del = gr.Button(value="Reset")
-                        
+
                 btn.click(
-                    add_net, inputs=[uploads, ti_state, lora_state], outputs=[ti_state, lora_state, ti_vals, lora_vals, uploads]
+                    add_net,
+                    inputs=[uploads, ti_state, lora_state],
+                    outputs=[ti_state, lora_state, ti_vals, lora_vals, uploads],
                 )
                 btn_del.click(
-                    clean_states, inputs=[ti_state, lora_state], outputs=[ti_state, lora_state, ti_vals, lora_vals, uploads]
+                    clean_states,
+                    inputs=[ti_state, lora_state],
+                    outputs=[ti_state, lora_state, ti_vals, lora_vals, uploads],
                 )
 
         # error_output = gr.Markdown()
@@ -743,7 +766,7 @@ with gr.Blocks(css=css) as demo:
         ti_state,
         model,
         lora_state,
-        lora_scale
+        lora_scale,
     ]
     outputs = [image_out]
     prompt.submit(inference, inputs=inputs, outputs=outputs)

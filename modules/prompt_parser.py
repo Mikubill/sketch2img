@@ -1,10 +1,10 @@
-
 import re
 import math
 import numpy as np
 import torch
 
 # Code from https://github.com/AUTOMATIC1111/stable-diffusion-webui/commit/8e2aeee4a127b295bfc880800e4a312e0f049b85, modified.
+
 
 class PromptChunk:
     """
@@ -215,7 +215,9 @@ class FrozenCLIPEmbedderWithCustomWordsBase(torch.nn.Module):
         # restoring original mean is likely not correct, but it seems to work well to prevent artifacts that happen otherwise
         batch_multipliers = torch.asarray(batch_multipliers).to(self.device())
         original_mean = z.mean()
-        z = z * batch_multipliers.reshape(batch_multipliers.shape + (1,)).expand(z.shape)
+        z = z * batch_multipliers.reshape(batch_multipliers.shape + (1,)).expand(
+            z.shape
+        )
         new_mean = z.mean()
         z = z * (original_mean / new_mean)
 
@@ -223,6 +225,8 @@ class FrozenCLIPEmbedderWithCustomWordsBase(torch.nn.Module):
 
 
 class FrozenCLIPEmbedderWithCustomWords(FrozenCLIPEmbedderWithCustomWordsBase):
+    CLIP_stop_at_last_layers = 1
+
     def __init__(self, tokenizer, text_encoder):
         super().__init__(text_encoder)
         self.tokenizer = tokenizer
@@ -258,25 +262,24 @@ class FrozenCLIPEmbedderWithCustomWords(FrozenCLIPEmbedderWithCustomWordsBase):
         self.id_pad = self.id_end
 
     def tokenize(self, texts):
-        tokenized = self.tokenizer(
-            texts, truncation=False, add_special_tokens=False
-        )["input_ids"]
+        tokenized = self.tokenizer(texts, truncation=False, add_special_tokens=False)[
+            "input_ids"
+        ]
 
         return tokenized
 
     def encode_with_transformers(self, tokens):
-        CLIP_stop_at_last_layers = 1
         tokens = tokens.to(self.text_encoder.device)
         outputs = self.text_encoder(tokens, output_hidden_states=True)
 
-        if CLIP_stop_at_last_layers > 1:
-            z = outputs.hidden_states[-CLIP_stop_at_last_layers]
+        if self.CLIP_stop_at_last_layers > 1:
+            z = outputs.hidden_states[-self.CLIP_stop_at_last_layers]
             z = self.text_encoder.text_model.final_layer_norm(z)
         else:
             z = outputs.last_hidden_state
 
         return z
-    
+
 
 re_attention = re.compile(
     r"""

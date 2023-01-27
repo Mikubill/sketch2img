@@ -26,8 +26,9 @@ import modules.safe as _
 from safetensors.torch import load_file
 
 xformers_available = False
-try: 
+try:
     import xformers
+
     xformers_available = True
 except ImportError:
     pass
@@ -36,6 +37,7 @@ EPSILON = 1e-6
 exists = lambda val: val is not None
 default = lambda val, d: val if exists(val) else d
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
 
 def get_attention_scores(attn, query, key, attention_mask=None):
 
@@ -65,72 +67,91 @@ def get_attention_scores(attn, query, key, attention_mask=None):
 
     return attention_scores
 
-    
+
 def load_lora_attn_procs(model_file, unet, scale=1.0):
-        
-        if Path(model_file).suffix == ".pt":
-            state_dict = torch.load(model_file, map_location="cpu")
-        else:
-            state_dict = load_file(model_file, device="cpu")
-        
-        # 'lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight'
-        # 'down_blocks.0.attentions.0.transformer_blocks.0.attn1.processor.to_q_lora.down.weight'
-        if any("lora_unet_down_blocks"in k for k in state_dict.keys()):
-            # extract ldm format lora
-            df_lora = {}
-            attn_numlayer = re.compile(r'_attn(\d)_to_([qkv]|out).lora_')
-            alpha_numlayer = re.compile(r'_attn(\d)_to_([qkv]|out).alpha')
-            for k, v in state_dict.items():
-                if "attn" not in k or "lora_te" in k:
-                    # currently not support: ff, clip-attn
-                    continue
-                k = k.replace("lora_unet_down_blocks_", "down_blocks.")
-                k = k.replace("lora_unet_up_blocks_", "up_blocks.")
-                k = k.replace("lora_unet_mid_block_", "mid_block_")
-                k = k.replace("_attentions_", ".attentions.")
-                k = k.replace("_transformer_blocks_", ".transformer_blocks.")
-                k = k.replace("to_out_0", "to_out")
-                k = attn_numlayer.sub(r'.attn\1.processor.to_\2_lora.', k)
-                k = alpha_numlayer.sub(r'.attn\1.processor.to_\2_lora.alpha', k)
-                df_lora[k] = v
-            state_dict = df_lora
 
-        # fill attn processors
-        attn_processors = {}
+    if Path(model_file).suffix == ".pt":
+        state_dict = torch.load(model_file, map_location="cpu")
+    else:
+        state_dict = load_file(model_file, device="cpu")
 
-        is_lora = all("lora" in k for k in state_dict.keys())
+    # 'lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight'
+    # 'down_blocks.0.attentions.0.transformer_blocks.0.attn1.processor.to_q_lora.down.weight'
+    if any("lora_unet_down_blocks" in k for k in state_dict.keys()):
+        # extract ldm format lora
+        df_lora = {}
+        attn_numlayer = re.compile(r"_attn(\d)_to_([qkv]|out).lora_")
+        alpha_numlayer = re.compile(r"_attn(\d)_to_([qkv]|out).alpha")
+        for k, v in state_dict.items():
+            if "attn" not in k or "lora_te" in k:
+                # currently not support: ff, clip-attn
+                continue
+            k = k.replace("lora_unet_down_blocks_", "down_blocks.")
+            k = k.replace("lora_unet_up_blocks_", "up_blocks.")
+            k = k.replace("lora_unet_mid_block_", "mid_block_")
+            k = k.replace("_attentions_", ".attentions.")
+            k = k.replace("_transformer_blocks_", ".transformer_blocks.")
+            k = k.replace("to_out_0", "to_out")
+            k = attn_numlayer.sub(r".attn\1.processor.to_\2_lora.", k)
+            k = alpha_numlayer.sub(r".attn\1.processor.to_\2_lora.alpha", k)
+            df_lora[k] = v
+        state_dict = df_lora
 
-        if is_lora:
-            lora_grouped_dict = defaultdict(dict)
-            for key, value in state_dict.items():
-                if "alpha" in key:
-                    attn_processor_key, sub_key = ".".join(key.split(".")[:-2]), ".".join(key.split(".")[-2:])
-                else:
-                    attn_processor_key, sub_key = ".".join(key.split(".")[:-3]), ".".join(key.split(".")[-3:])
-                lora_grouped_dict[attn_processor_key][sub_key] = value
+    # fill attn processors
+    attn_processors = {}
 
-            for key, value_dict in lora_grouped_dict.items():
-                rank = value_dict["to_k_lora.down.weight"].shape[0]
-                cross_attention_dim = value_dict["to_k_lora.down.weight"].shape[1]
-                hidden_size = value_dict["to_k_lora.up.weight"].shape[0]
+    is_lora = all("lora" in k for k in state_dict.keys())
 
-                attn_processors[key] = LoRACrossAttnProcessor(
-                    hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, rank=rank, scale=scale
+    if is_lora:
+        lora_grouped_dict = defaultdict(dict)
+        for key, value in state_dict.items():
+            if "alpha" in key:
+                attn_processor_key, sub_key = ".".join(key.split(".")[:-2]), ".".join(
+                    key.split(".")[-2:]
                 )
-                attn_processors[key].load_state_dict(value_dict, strict=False)
+            else:
+                attn_processor_key, sub_key = ".".join(key.split(".")[:-3]), ".".join(
+                    key.split(".")[-3:]
+                )
+            lora_grouped_dict[attn_processor_key][sub_key] = value
 
-        else:
-            raise ValueError(f"{model_file} does not seem to be in the correct format expected by LoRA training.")
+        for key, value_dict in lora_grouped_dict.items():
+            rank = value_dict["to_k_lora.down.weight"].shape[0]
+            cross_attention_dim = value_dict["to_k_lora.down.weight"].shape[1]
+            hidden_size = value_dict["to_k_lora.up.weight"].shape[0]
 
-        # set correct dtype & device
-        attn_processors = {k: v.to(device=unet.device, dtype=unet.dtype) for k, v in attn_processors.items()}
+            attn_processors[key] = LoRACrossAttnProcessor(
+                hidden_size=hidden_size,
+                cross_attention_dim=cross_attention_dim,
+                rank=rank,
+                scale=scale,
+            )
+            attn_processors[key].load_state_dict(value_dict, strict=False)
 
-        # set layers
-        unet.set_attn_processor(attn_processors)
+    else:
+        raise ValueError(
+            f"{model_file} does not seem to be in the correct format expected by LoRA training."
+        )
+
+    # set correct dtype & device
+    attn_processors = {
+        k: v.to(device=unet.device, dtype=unet.dtype)
+        for k, v in attn_processors.items()
+    }
+
+    # set layers
+    unet.set_attn_processor(attn_processors)
 
 
-class CrossAttnProcessor(nn.Module):        
-    def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, qkvo_bias=None):
+class CrossAttnProcessor(nn.Module):
+    def __call__(
+        self,
+        attn,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        qkvo_bias=None,
+    ):
         batch_size, sequence_length, _ = hidden_states.shape
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)
 
@@ -146,12 +167,12 @@ class CrossAttnProcessor(nn.Module):
         query = attn.to_q(hidden_states)
         key = attn.to_k(encoder_states)
         value = attn.to_v(encoder_states)
-        
+
         if qkvo_bias is not None:
             query += qkvo_bias["q"](hidden_states)
             key += qkvo_bias["k"](encoder_states)
             value += qkvo_bias["v"](encoder_states)
-        
+
         query = attn.head_to_batch_dim(query)
         key = attn.head_to_batch_dim(key)
         value = attn.head_to_batch_dim(value)
@@ -161,56 +182,74 @@ class CrossAttnProcessor(nn.Module):
             attention_scores = get_attention_scores(attn, query, key, attention_mask)
             w = img_state[sequence_length].to(query.device)
             cross_attention_weight = weight_func(w, sigma, attention_scores)
-            attention_scores += torch.repeat_interleave(cross_attention_weight, repeats=attn.heads, dim=0)
-            
+            attention_scores += torch.repeat_interleave(
+                cross_attention_weight, repeats=attn.heads, dim=0
+            )
+
             # calc probs
             attention_probs = attention_scores.softmax(dim=-1)
             attention_probs = attention_probs.to(query.dtype)
             hidden_states = torch.bmm(attention_probs, value)
-            
+
         elif xformers_available:
             hidden_states = xformers.ops.memory_efficient_attention(
-                query.contiguous(), key.contiguous(), value.contiguous(), attn_bias=attention_mask
+                query.contiguous(),
+                key.contiguous(),
+                value.contiguous(),
+                attn_bias=attention_mask,
             )
             hidden_states = hidden_states.to(query.dtype)
-        
+
         else:
             q_bucket_size = 512
             k_bucket_size = 1024
-            
+
             # use flash-attention
             hidden_states = FlashAttentionFunction.apply(
-                query.contiguous(), key.contiguous(), value.contiguous(), 
-                attention_mask, causal=False, q_bucket_size=q_bucket_size, k_bucket_size=k_bucket_size
+                query.contiguous(),
+                key.contiguous(),
+                value.contiguous(),
+                attention_mask,
+                causal=False,
+                q_bucket_size=q_bucket_size,
+                k_bucket_size=k_bucket_size,
             )
             hidden_states = hidden_states.to(query.dtype)
-            
+
         hidden_states = attn.batch_to_head_dim(hidden_states)
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
-        
+
         if qkvo_bias is not None:
             hidden_states += qkvo_bias["o"](hidden_states)
-        
+
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
 
         return hidden_states
-    
+
 
 class LoRACrossAttnProcessor(CrossAttnProcessor):
     def __init__(self, hidden_size, cross_attention_dim=None, rank=4, scale=1.0):
         super().__init__()
 
         self.to_q_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
-        self.to_k_lora = LoRALinearLayer(cross_attention_dim or hidden_size, hidden_size, rank)
-        self.to_v_lora = LoRALinearLayer(cross_attention_dim or hidden_size, hidden_size, rank)
+        self.to_k_lora = LoRALinearLayer(
+            cross_attention_dim or hidden_size, hidden_size, rank
+        )
+        self.to_v_lora = LoRALinearLayer(
+            cross_attention_dim or hidden_size, hidden_size, rank
+        )
         self.to_out_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
         self.scale = scale
-        
+
     def __call__(
-        self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, 
+        self,
+        attn,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
     ):
         scale = self.scale
         qkvo_bias = {
@@ -219,33 +258,37 @@ class LoRACrossAttnProcessor(CrossAttnProcessor):
             "v": lambda inputs: scale * self.to_v_lora(inputs),
             "o": lambda inputs: scale * self.to_out_lora(inputs),
         }
-        return super().__call__(attn, hidden_states, encoder_hidden_states, attention_mask, qkvo_bias)
+        return super().__call__(
+            attn, hidden_states, encoder_hidden_states, attention_mask, qkvo_bias
+        )
 
 
 class LoRALinearLayer(nn.Module):
-     def __init__(self, in_features, out_features, rank=4):
-         super().__init__()
+    def __init__(self, in_features, out_features, rank=4):
+        super().__init__()
 
-         if rank > min(in_features, out_features):
-             raise ValueError(f"LoRA rank {rank} must be less or equal than {min(in_features, out_features)}")
+        if rank > min(in_features, out_features):
+            raise ValueError(
+                f"LoRA rank {rank} must be less or equal than {min(in_features, out_features)}"
+            )
 
-         self.down = nn.Linear(in_features, rank, bias=False)
-         self.up = nn.Linear(rank, out_features, bias=False)
-         self.scale = 1.0
-         self.alpha = rank
+        self.down = nn.Linear(in_features, rank, bias=False)
+        self.up = nn.Linear(rank, out_features, bias=False)
+        self.scale = 1.0
+        self.alpha = rank
 
-         nn.init.normal_(self.down.weight, std=1 / rank)
-         nn.init.zeros_(self.up.weight)
+        nn.init.normal_(self.down.weight, std=1 / rank)
+        nn.init.zeros_(self.up.weight)
 
-     def forward(self, hidden_states):
-         orig_dtype = hidden_states.dtype
-         dtype = self.down.weight.dtype
-         rank = self.down.out_features
+    def forward(self, hidden_states):
+        orig_dtype = hidden_states.dtype
+        dtype = self.down.weight.dtype
+        rank = self.down.out_features
 
-         down_hidden_states = self.down(hidden_states.to(dtype))
-         up_hidden_states = self.up(down_hidden_states) * (self.alpha / rank)
+        down_hidden_states = self.down(hidden_states.to(dtype))
+        up_hidden_states = self.up(down_hidden_states) * (self.alpha / rank)
 
-         return up_hidden_states.to(orig_dtype)
+        return up_hidden_states.to(orig_dtype)
 
 
 class ModelWrapper:
@@ -287,8 +330,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
             scheduler=scheduler,
         )
         self.setup_unet(self.unet)
-        self.prompt_parser = FrozenCLIPEmbedderWithCustomWords(self.tokenizer, self.text_encoder)
-    
+        self.prompt_parser = FrozenCLIPEmbedderWithCustomWords(
+            self.tokenizer, self.text_encoder
+        )
+        
+    def set_clip_skip(self, n):
+        self.prompt_parser.CLIP_stop_at_last_layers = n
+
     def setup_unet(self, unet):
         unet = unet.to(self.device)
         model = ModelWrapper(unet, self.scheduler.alphas_cumprod)
@@ -301,14 +349,14 @@ class StableDiffusionPipeline(DiffusionPipeline):
         library = importlib.import_module("k_diffusion")
         sampling = getattr(library, "sampling")
         return getattr(sampling, scheduler_type)
-    
+
     def encode_sketchs(self, state, scale_ratio=8, g_strength=1.0, text_ids=None):
         uncond, cond = text_ids[0], text_ids[1]
-        
+
         img_state = []
         if state is None:
             return torch.FloatTensor(0)
-        
+
         for k, v in state.items():
             if v["map"] is None:
                 continue
@@ -319,14 +367,16 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 truncation=True,
                 add_special_tokens=False,
             ).input_ids
-            
+
             dotmap = v["map"] < 255
-            arr = torch.from_numpy(dotmap.astype(float) * float(v["weight"]) * g_strength)
+            arr = torch.from_numpy(
+                dotmap.astype(float) * float(v["weight"]) * g_strength
+            )
             img_state.append((v_input, arr))
-            
+
         if len(img_state) == 0:
             return torch.FloatTensor(0)
-            
+
         w_tensors = dict()
         cond = cond.tolist()
         uncond = uncond.tolist()
@@ -341,26 +391,31 @@ class StableDiffusionPipeline(DiffusionPipeline):
             for v_as_tokens, img_where_color in img_state:
                 is_in = 0
 
-                ret = F.interpolate(
-                    img_where_color.unsqueeze(0).unsqueeze(1),
-                    scale_factor=1 / scale_ratio,
-                    mode="bilinear",
-                    align_corners=True,
-                ).squeeze().reshape(-1, 1).repeat(1, len(v_as_tokens))  
-                
+                ret = (
+                    F.interpolate(
+                        img_where_color.unsqueeze(0).unsqueeze(1),
+                        scale_factor=1 / scale_ratio,
+                        mode="bilinear",
+                        align_corners=True,
+                    )
+                    .squeeze()
+                    .reshape(-1, 1)
+                    .repeat(1, len(v_as_tokens))
+                )
+
                 for idx, tok in enumerate(cond):
                     if cond[idx : idx + len(v_as_tokens)] == v_as_tokens:
                         is_in = 1
-                        ret_cond_tensor[0, :, idx : idx + len(v_as_tokens)] += (ret)
-                        
+                        ret_cond_tensor[0, :, idx : idx + len(v_as_tokens)] += ret
+
                 for idx, tok in enumerate(uncond):
                     if uncond[idx : idx + len(v_as_tokens)] == v_as_tokens:
-                        is_in = 1                      
-                        ret_uncond_tensor[0, :, idx : idx + len(v_as_tokens)] += (ret)
+                        is_in = 1
+                        ret_uncond_tensor[0, :, idx : idx + len(v_as_tokens)] += ret
 
                 if not is_in == 1:
                     print(f"tokens {v_as_tokens} not found in text")
-                    
+
             w_tensors[w_r * h_r] = torch.cat([ret_uncond_tensor, ret_cond_tensor])
             scale_ratio *= 2
 
@@ -432,7 +487,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             ):
                 return torch.device(module._hf_hook.execution_device)
         return self.device
-        
+
     def decode_latents(self, latents):
         latents = latents.to(self.device, dtype=self.vae.dtype)
         latents = 1 / 0.18215 * latents
@@ -533,7 +588,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         pww_attn_weight=1.0,
         sampler_name="",
         sampler_opt={},
-        scale_ratio=8.0
+        scale_ratio=8.0,
     ):
         sampler = self.get_scheduler(sampler_name)
         if image is not None:
@@ -556,8 +611,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
         # 3. Encode input prompt
         text_ids, text_embeddings = self.prompt_parser([negative_prompt, prompt])
         text_embeddings = text_embeddings.to(self.unet.dtype)
-        
-        init_timestep = int(num_inference_steps / min(strength, 0.999)) if strength > 0 else 0
+
+        init_timestep = (
+            int(num_inference_steps / min(strength, 0.999)) if strength > 0 else 0
+        )
         sigmas = self.get_sigmas(init_timestep, sampler_opt).to(
             text_embeddings.device, dtype=text_embeddings.dtype
         )
@@ -581,17 +638,15 @@ class StableDiffusionPipeline(DiffusionPipeline):
         )
 
         img_state = self.encode_sketchs(
-            pww_state, 
+            pww_state,
             g_strength=pww_attn_weight,
             text_ids=text_ids,
         )
-        
+
         def model_fn(x, sigma):
-            
+
             latent_model_input = torch.cat([x] * 2)
-            weight_func = (
-                lambda w, sigma, qk: w * math.log(1 + sigma) * qk.max()
-            )
+            weight_func = lambda w, sigma, qk: w * math.log(1 + sigma) * qk.max()
             encoder_state = {
                 "img_state": img_state,
                 "states": text_embeddings,
@@ -744,19 +799,17 @@ class StableDiffusionPipeline(DiffusionPipeline):
         self.k_diffusion_model.log_sigmas = self.k_diffusion_model.log_sigmas.to(
             latents.device
         )
-        
+
         img_state = self.encode_sketchs(
-            pww_state, 
+            pww_state,
             g_strength=pww_attn_weight,
             text_ids=text_ids,
         )
 
         def model_fn(x, sigma):
-            
+
             latent_model_input = torch.cat([x] * 2)
-            weight_func = (
-                lambda w, sigma, qk: w * math.log(1 + sigma) * qk.max()
-            )
+            weight_func = lambda w, sigma, qk: w * math.log(1 + sigma) * qk.max()
             encoder_state = {
                 "img_state": img_state,
                 "states": text_embeddings,
@@ -802,7 +855,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 sampler_name=sampler_name,
                 sampler_opt=sampler_opt,
                 pww_state=None,
-                pww_attn_weight=pww_attn_weight/2,
+                pww_attn_weight=pww_attn_weight / 2,
             )
 
         # 8. Post-processing
@@ -816,76 +869,83 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
 
 class FlashAttentionFunction(Function):
-
-    
     @staticmethod
     @torch.no_grad()
     def forward(ctx, q, k, v, mask, causal, q_bucket_size, k_bucket_size):
-        """ Algorithm 2 in the paper """
+        """Algorithm 2 in the paper"""
 
         device = q.device
         max_neg_value = -torch.finfo(q.dtype).max
         qk_len_diff = max(k.shape[-2] - q.shape[-2], 0)
 
         o = torch.zeros_like(q)
-        all_row_sums = torch.zeros((*q.shape[:-1], 1), device = device)
-        all_row_maxes = torch.full((*q.shape[:-1], 1), max_neg_value, device = device)
+        all_row_sums = torch.zeros((*q.shape[:-1], 1), device=device)
+        all_row_maxes = torch.full((*q.shape[:-1], 1), max_neg_value, device=device)
 
-        scale = (q.shape[-1] ** -0.5)
+        scale = q.shape[-1] ** -0.5
 
         if not exists(mask):
             mask = (None,) * math.ceil(q.shape[-2] / q_bucket_size)
         else:
-            mask = rearrange(mask, 'b n -> b 1 1 n')
-            mask = mask.split(q_bucket_size, dim = -1)
+            mask = rearrange(mask, "b n -> b 1 1 n")
+            mask = mask.split(q_bucket_size, dim=-1)
 
         row_splits = zip(
-            q.split(q_bucket_size, dim = -2),
-            o.split(q_bucket_size, dim = -2),
+            q.split(q_bucket_size, dim=-2),
+            o.split(q_bucket_size, dim=-2),
             mask,
-            all_row_sums.split(q_bucket_size, dim = -2),
-            all_row_maxes.split(q_bucket_size, dim = -2),
+            all_row_sums.split(q_bucket_size, dim=-2),
+            all_row_maxes.split(q_bucket_size, dim=-2),
         )
 
         for ind, (qc, oc, row_mask, row_sums, row_maxes) in enumerate(row_splits):
             q_start_index = ind * q_bucket_size - qk_len_diff
 
             col_splits = zip(
-                k.split(k_bucket_size, dim = -2),
-                v.split(k_bucket_size, dim = -2),
+                k.split(k_bucket_size, dim=-2),
+                v.split(k_bucket_size, dim=-2),
             )
 
             for k_ind, (kc, vc) in enumerate(col_splits):
                 k_start_index = k_ind * k_bucket_size
 
-                attn_weights = einsum('... i d, ... j d -> ... i j', qc, kc) * scale
+                attn_weights = einsum("... i d, ... j d -> ... i j", qc, kc) * scale
 
                 if exists(row_mask):
                     attn_weights.masked_fill_(~row_mask, max_neg_value)
 
                 if causal and q_start_index < (k_start_index + k_bucket_size - 1):
-                    causal_mask = torch.ones((qc.shape[-2], kc.shape[-2]), dtype = torch.bool, device = device).triu(q_start_index - k_start_index + 1)
+                    causal_mask = torch.ones(
+                        (qc.shape[-2], kc.shape[-2]), dtype=torch.bool, device=device
+                    ).triu(q_start_index - k_start_index + 1)
                     attn_weights.masked_fill_(causal_mask, max_neg_value)
 
-                block_row_maxes = attn_weights.amax(dim = -1, keepdims = True)
+                block_row_maxes = attn_weights.amax(dim=-1, keepdims=True)
                 attn_weights -= block_row_maxes
                 exp_weights = torch.exp(attn_weights)
 
                 if exists(row_mask):
-                    exp_weights.masked_fill_(~row_mask, 0.)
+                    exp_weights.masked_fill_(~row_mask, 0.0)
 
-                block_row_sums = exp_weights.sum(dim = -1, keepdims = True).clamp(min = EPSILON)
+                block_row_sums = exp_weights.sum(dim=-1, keepdims=True).clamp(
+                    min=EPSILON
+                )
 
                 new_row_maxes = torch.maximum(block_row_maxes, row_maxes)
 
-                exp_values = einsum('... i j, ... j d -> ... i d', exp_weights, vc)
+                exp_values = einsum("... i j, ... j d -> ... i d", exp_weights, vc)
 
                 exp_row_max_diff = torch.exp(row_maxes - new_row_maxes)
                 exp_block_row_max_diff = torch.exp(block_row_maxes - new_row_maxes)
 
-                new_row_sums = exp_row_max_diff * row_sums + exp_block_row_max_diff * block_row_sums
+                new_row_sums = (
+                    exp_row_max_diff * row_sums
+                    + exp_block_row_max_diff * block_row_sums
+                )
 
-                oc.mul_((row_sums / new_row_sums) * exp_row_max_diff).add_((exp_block_row_max_diff / new_row_sums) * exp_values)
+                oc.mul_((row_sums / new_row_sums) * exp_row_max_diff).add_(
+                    (exp_block_row_max_diff / new_row_sums) * exp_values
+                )
 
                 row_maxes.copy_(new_row_maxes)
                 row_sums.copy_(new_row_sums)
@@ -900,7 +960,7 @@ class FlashAttentionFunction(Function):
     @staticmethod
     @torch.no_grad()
     def backward(ctx, do):
-        """ Algorithm 4 in the paper """
+        """Algorithm 4 in the paper"""
 
         causal, scale, mask, q_bucket_size, k_bucket_size = ctx.args
         q, k, v, o, lse = ctx.saved_tensors
@@ -915,46 +975,48 @@ class FlashAttentionFunction(Function):
         dv = torch.zeros_like(v)
 
         row_splits = zip(
-            q.split(q_bucket_size, dim = -2),
-            o.split(q_bucket_size, dim = -2),
-            do.split(q_bucket_size, dim = -2),
+            q.split(q_bucket_size, dim=-2),
+            o.split(q_bucket_size, dim=-2),
+            do.split(q_bucket_size, dim=-2),
             mask,
-            lse.split(q_bucket_size, dim = -2),
-            dq.split(q_bucket_size, dim = -2)
+            lse.split(q_bucket_size, dim=-2),
+            dq.split(q_bucket_size, dim=-2),
         )
 
         for ind, (qc, oc, doc, row_mask, lsec, dqc) in enumerate(row_splits):
             q_start_index = ind * q_bucket_size - qk_len_diff
 
             col_splits = zip(
-                k.split(k_bucket_size, dim = -2),
-                v.split(k_bucket_size, dim = -2),
-                dk.split(k_bucket_size, dim = -2),
-                dv.split(k_bucket_size, dim = -2),
+                k.split(k_bucket_size, dim=-2),
+                v.split(k_bucket_size, dim=-2),
+                dk.split(k_bucket_size, dim=-2),
+                dv.split(k_bucket_size, dim=-2),
             )
 
             for k_ind, (kc, vc, dkc, dvc) in enumerate(col_splits):
                 k_start_index = k_ind * k_bucket_size
 
-                attn_weights = einsum('... i d, ... j d -> ... i j', qc, kc) * scale
+                attn_weights = einsum("... i d, ... j d -> ... i j", qc, kc) * scale
 
                 if causal and q_start_index < (k_start_index + k_bucket_size - 1):
-                    causal_mask = torch.ones((qc.shape[-2], kc.shape[-2]), dtype = torch.bool, device = device).triu(q_start_index - k_start_index + 1)
+                    causal_mask = torch.ones(
+                        (qc.shape[-2], kc.shape[-2]), dtype=torch.bool, device=device
+                    ).triu(q_start_index - k_start_index + 1)
                     attn_weights.masked_fill_(causal_mask, max_neg_value)
 
                 p = torch.exp(attn_weights - lsec)
 
                 if exists(row_mask):
-                    p.masked_fill_(~row_mask, 0.)
+                    p.masked_fill_(~row_mask, 0.0)
 
-                dv_chunk = einsum('... i j, ... i d -> ... j d', p, doc)
-                dp = einsum('... i d, ... j d -> ... i j', doc, vc)
+                dv_chunk = einsum("... i j, ... i d -> ... j d", p, doc)
+                dp = einsum("... i d, ... j d -> ... i j", doc, vc)
 
-                D = (doc * oc).sum(dim = -1, keepdims = True)
+                D = (doc * oc).sum(dim=-1, keepdims=True)
                 ds = p * scale * (dp - D)
 
-                dq_chunk = einsum('... i j, ... j d -> ... i d', ds, kc)
-                dk_chunk = einsum('... i j, ... i d -> ... j d', ds, qc)
+                dq_chunk = einsum("... i j, ... j d -> ... i d", ds, kc)
+                dk_chunk = einsum("... i j, ... i d -> ... j d", ds, qc)
 
                 dqc.add_(dq_chunk)
                 dkc.add_(dk_chunk)
