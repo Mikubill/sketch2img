@@ -26,13 +26,13 @@ import modules.safe as _
 from modules.lora import LoRANetwork
 
 models = [
-    ("AbyssOrangeMix_Base", "/root/workspace/storage/models/orangemix"),
-    ("Stable Diffuison 1.5", "/root/models/stable-diffusion-v1-5"),
-    ("AnimeSFW", "/root/workspace/animesfw"),
+    # format: name, model_path, clip_skip
+    ("AbyssOrangeMix_Base", "/root/workspace/storage/models/orangemix", 2),
+    ("Stable Diffuison 1.5", "/root/models/stable-diffusion-v1-5", 1),
+    ("AnimeSFW", "/root/workspace/animesfw", 2),
 ]
 
-base_name, base_model = models[0]
-clip_skip = 1
+base_name, base_model, clip_skip = models[0]
 
 samplers_k_diffusion = [
     ("Euler a", "sample_euler_ancestral", {}),
@@ -92,7 +92,6 @@ pipe = StableDiffusionPipeline(
 )
 
 unet.set_attn_processor(CrossAttnProcessor)
-pipe.set_clip_skip(clip_skip)
 if torch.cuda.is_available():
     pipe = pipe.to("cuda")
 
@@ -133,7 +132,8 @@ def get_model(name):
     g_lora = lora_cache[name]
     g_unet.set_attn_processor(CrossAttnProcessor())
     g_lora.reset()
-    return g_unet, g_lora
+    clip_skip = models[keys.index(name)][2]
+    return g_unet, g_lora, clip_skip
 
 def error_str(error, title="Error"):
     return (
@@ -212,7 +212,8 @@ def inference(
     restore_all()
     generator = torch.Generator("cuda").manual_seed(int(seed))
 
-    local_unet, local_lora = get_model(model)
+    local_unet, local_lora, clip_skip = get_model(model)
+    pipe.set_clip_skip(clip_skip)
     if lora_state is not None and lora_state != "":
         local_lora.load(lora_state, lora_scale)
         local_lora.to(local_unet.device, dtype=local_unet.dtype)
