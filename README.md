@@ -17,7 +17,7 @@ Inspired by this method, we created a simple a1111-style sketching UI that allow
 
 **Config and Run**
 
-1. Set your model path in https://github.com/Mikubill/sketch2img/blob/eb886f1f6cbcc92fa58fc519fa0466cb50b05e55/app_pww.py#L26-L33
+1. Set your model path in https://github.com/Mikubill/sketch2img/blob/660699bcb3eee8b34724f8c1c011fadb9de07b1a/app_pww.py#L28-L35
 2. `python app_pww.py`
 
 **Some samples**
