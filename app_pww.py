@@ -92,6 +92,7 @@ pipe = StableDiffusionPipeline(
 )
 
 unet.set_attn_processor(CrossAttnProcessor)
+pipe.setup_text_encoder(clip_skip, text_encoder)
 if torch.cuda.is_available():
     pipe = pipe.to("cuda")
 
