@@ -332,7 +332,7 @@ def detect_text(text, state, width, height):
         item = item.strip()
         if item == "":
             continue
-        if item in state:
+        if state is not None and item in state:
             new_state[item] = {
                 "map": state[item]["map"],
                 "weight": state[item]["weight"],
