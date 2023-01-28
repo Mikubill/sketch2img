@@ -116,6 +116,9 @@ lora_cache = {
     base_name: LoRANetwork(text_encoder, unet)
 }
 
+te_base_weight_length = text_encoder.get_input_embeddings().weight.data.shape[0]
+original_prepare_for_tokenization = tokenizer.prepare_for_tokenization
+
 def setup_model(name, lora_state=None, lora_scale=1.0):
     global pipe
     
@@ -167,9 +170,6 @@ def error_str(error, title="Error"):
         if error
         else ""
     )
-
-te_base_weight_length = text_encoder.get_input_embeddings().weight.data.shape[0]
-original_prepare_for_tokenization = tokenizer.prepare_for_tokenization
 
 def make_token_names(embs):
     all_tokens = []
