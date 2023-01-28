@@ -55,8 +55,9 @@ class LoRAModule(torch.nn.Module):
         self.org_module = org_module  # remove in applying
         self.enable = False
         
-    def resize(self, rank, alpha):
+    def resize(self, rank, alpha, multiplier):
         self.alpha = torch.tensor(alpha)
+        self.multiplier = multiplier
         self.scale = alpha / rank
         if self.lora_down.__class__.__name__ == "Conv2d":
             in_dim = self.lora_down.in_channels
@@ -172,9 +173,10 @@ class LoRANetwork(torch.nn.Module):
             weights_to_modify += self.unet_loras
             
         for lora in self.text_encoder_loras + self.unet_loras:
-            lora.resize(network_dim, network_alpha)
+            lora.resize(network_dim, network_alpha, scale)
             if lora in weights_to_modify:
                 lora.enable = True
 
         info = self.load_state_dict(weights, False)
-        print(f"Weights are loaded. Unexpect keys={info.unexpected_keys}")
+        if len(info.unexpected_keys) > 0:
+            print(f"Weights are loaded. Unexpected keys={info.unexpected_keys}")

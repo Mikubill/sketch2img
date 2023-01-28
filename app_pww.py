@@ -103,6 +103,10 @@ def get_model_list():
             model_available.append(model)
     return model_available
 
+te_cache = {
+    base_name: text_encoder
+}
+
 unet_cache = {
     base_name: unet
 }
@@ -111,29 +115,46 @@ lora_cache = {
     base_name: LoRANetwork(text_encoder, unet)
 }
 
-def get_model(name):
+def setup_model(name, lora_state=None, lora_scale=1.0):
+    global pipe
+    
     keys = [k[0] for k in models]
     if name not in unet_cache:
         if name not in keys:
             raise ValueError(name)
         else:
+            
+            text_encoder = CLIPTextModel.from_pretrained(
+                base_model,
+                subfolder="text_encoder",
+                torch_dtype=torch.float16,
+            )
             unet = UNet2DConditionModel.from_pretrained(
                 models[keys.index(name)][1],
                 subfolder="unet",
                 torch_dtype=torch.float16,
             )
+            
             if torch.cuda.is_available():
                 unet.to("cuda")
+                text_encoder.to("cuda")
                 
             unet_cache[name] = unet
-            lora_cache[name] = LoRANetwork(lora_cache[base_name].text_encoder_loras, unet)
+            te_cache[name] = text_encoder
+            lora_cache[name] = LoRANetwork(text_encoder, unet)
 
-    g_unet = unet_cache[name]
-    g_lora = lora_cache[name]
-    g_unet.set_attn_processor(CrossAttnProcessor())
-    g_lora.reset()
+    local_te, local_unet, local_lora, = te_cache[name], unet_cache[name], lora_cache[name]
+    local_unet.set_attn_processor(CrossAttnProcessor())
+    local_lora.reset()
     clip_skip = models[keys.index(name)][2]
-    return g_unet, g_lora, clip_skip
+    
+    if lora_state is not None and lora_state != "":
+        local_lora.load(lora_state, lora_scale)
+        local_lora.to(local_unet.device, dtype=local_unet.dtype)
+    
+    pipe.setup_unet(local_unet)
+    pipe.setup_text_encoder(clip_skip, local_te)
+    return pipe
 
 def error_str(error, title="Error"):
     return (
@@ -210,15 +231,9 @@ def inference(
         seed = random.randint(0, 2147483647)
         
     restore_all()
+    setup_model(model, lora_state, lora_scale)
     generator = torch.Generator("cuda").manual_seed(int(seed))
 
-    local_unet, local_lora, clip_skip = get_model(model)
-    pipe.set_clip_skip(clip_skip)
-    if lora_state is not None and lora_state != "":
-        local_lora.load(lora_state, lora_scale)
-        local_lora.to(local_unet.device, dtype=local_unet.dtype)
-    
-    pipe.setup_unet(local_unet)
     sampler_name, sampler_opt = None, None
     for label, funcname, options in samplers_k_diffusion:
         if label == sampler:

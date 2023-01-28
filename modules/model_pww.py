@@ -184,11 +184,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
             scheduler=scheduler,
         )
         self.setup_unet(self.unet)
-        self.prompt_parser = FrozenCLIPEmbedderWithCustomWords(
-            self.tokenizer, self.text_encoder
-        )
+        self.setup_text_encoder()
         
-    def set_clip_skip(self, n):
+    def setup_text_encoder(self, n=1, new_encoder=None):
+        if new_encoder is not None:
+            self.text_encoder = new_encoder
+        
+        self.prompt_parser = FrozenCLIPEmbedderWithCustomWords(self.tokenizer, self.text_encoder)
         self.prompt_parser.CLIP_stop_at_last_layers = n
 
     def setup_unet(self, unet):
