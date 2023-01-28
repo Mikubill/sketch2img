@@ -293,6 +293,9 @@ def get_color(n):
 def create_mixed_img(current, state, w=512, h=512):
     w, h = int(w), int(h)
     image_np = np.full([h, w, 4], 255)
+    if state is None:
+        state = {}
+        
     colors = get_color(len(state))
     idx = 0
 
