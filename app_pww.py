@@ -154,6 +154,9 @@ def setup_model(name, lora_state=None, lora_scale=1.0):
         local_lora.to(local_unet.device, dtype=local_unet.dtype)
     
     pipe.setup_unet(local_unet)
+    pipe.tokenizer.prepare_for_tokenization = original_prepare_for_tokenization
+    pipe.tokenizer.added_tokens_encoder = {}
+    pipe.tokenizer.added_tokens_decoder = {}
     pipe.setup_text_encoder(clip_skip, local_te)
     return pipe
 
@@ -175,7 +178,7 @@ def make_token_names(embs):
         all_tokens.append(tokens)
     return all_tokens
 
-def setup_tokenizer(embs):
+def setup_tokenizer(tokenizer, embs):
     reg_match = [re.compile(fr"(?:^|(?<=\s|,)){k}(?=,|\s|$)") for k in embs.keys()]
     clip_keywords = [' '.join(s) for s in make_token_names(embs)]
 
@@ -191,18 +194,6 @@ def setup_tokenizer(embs):
 
     tokenizer.prepare_for_tokenization = prepare_for_tokenization.__get__(tokenizer, CLIPTokenizer)
     return [t for sublist in make_token_names(embs) for t in sublist]
-
-def restore_all():
-    global te_base_weight, tokenizer
-    tokenizer.prepare_for_tokenization = original_prepare_for_tokenization
-    
-    embeddings = text_encoder.get_input_embeddings()
-    text_encoder.get_input_embeddings().weight.data = embeddings.weight.data[:te_base_weight_length]
-    tokenizer = CLIPTokenizer.from_pretrained(
-        base_model,
-        subfolder="tokenizer",
-        torch_dtype=torch.float16,
-    )
 
 
 def inference(
@@ -227,19 +218,17 @@ def inference(
     lora_state=None,
     lora_scale=None,
 ):
-    global pipe, unet, tokenizer, text_encoder
     if seed is None or seed == 0:
         seed = random.randint(0, 2147483647)
         
-    restore_all()
-    setup_model(model, lora_state, lora_scale)
+    pipe = setup_model(model, lora_state, lora_scale)
     generator = torch.Generator("cuda").manual_seed(int(seed))
-
     sampler_name, sampler_opt = None, None
     for label, funcname, options in samplers_k_diffusion:
         if label == sampler:
             sampler_name, sampler_opt = funcname, options
-
+            
+    tokenizer, text_encoder = pipe.tokenizer, pipe.text_encoder
     if embs is not None and len(embs) > 0:
         delta_weight = []
         ti_embs = {}
@@ -252,14 +241,15 @@ def inference(
             ti_embs[name] = loaded_learned_embeds
             
         if len(ti_embs) > 0:
-            tokens = setup_tokenizer(ti_embs)
+            tokens = setup_tokenizer(tokenizer, ti_embs)
             added_tokens = tokenizer.add_tokens(tokens)
             delta_weight = torch.cat([val for val in ti_embs.values()], dim=0)
-            
+        
             assert added_tokens == delta_weight.shape[0]
             text_encoder.resize_token_embeddings(len(tokenizer))
-            text_encoder.get_input_embeddings().weight.data[-delta_weight.shape[0]:] = delta_weight
-
+            token_embeds = text_encoder.get_input_embeddings().weight.data
+            token_embeds[-delta_weight.shape[0]:] = delta_weight
+            
     config = {
         "negative_prompt": neg_prompt,
         "num_inference_steps": int(steps),
@@ -290,10 +280,7 @@ def inference(
         )
     else:
         result = pipe.txt2img(prompt, width=width, height=height, **config)
-
-    # restore
-    if embs is not None and len(embs) > 0:
-        restore_all()
+        
     return gr.Image.update(result[0][0], label=f"Initial Seed: {seed}")
 
 
