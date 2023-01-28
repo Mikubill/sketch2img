@@ -125,7 +125,7 @@ def setup_model(name, lora_state=None, lora_scale=1.0):
         else:
             
             text_encoder = CLIPTextModel.from_pretrained(
-                base_model,
+                models[keys.index(name)][1],
                 subfolder="text_encoder",
                 torch_dtype=torch.float16,
             )
