@@ -329,7 +329,7 @@ def apply_new_res(w, h, state):
 def detect_text(text, state, width, height):
     
     if text is None or text == "":
-        return None, None, None, None
+        return None, None, gr.Radio.update(value=None), None
 
     t = text.split(",")
     new_state = {}
@@ -370,7 +370,7 @@ def resize(img, w, h):
 
 def switch_canvas(entry, state, width, height):
     if entry == None:
-        return None, 0.5, create_mixed_img("", state, width, height)
+        return None, 0.5, False, create_mixed_img("", state, width, height)
 
     return (
         gr.update(value=None, interactive=True),
