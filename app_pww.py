@@ -91,7 +91,7 @@ pipe = StableDiffusionPipeline(
     scheduler=scheduler,
 )
 
-unet.set_attn_processor(CrossAttnProcessor)
+unet.set_attn_processor(CrossAttnProcessor())
 pipe.setup_text_encoder(clip_skip, text_encoder)
 if torch.cuda.is_available():
     pipe = pipe.to("cuda")
@@ -105,57 +105,55 @@ def get_model_list():
     return model_available
 
 te_cache = {
-    base_name: text_encoder
+    base_model: text_encoder
 }
 
 unet_cache = {
-    base_name: unet
+    base_model: unet
 }
 
 lora_cache = {
-    base_name: LoRANetwork(text_encoder, unet)
+    base_model: LoRANetwork(text_encoder, unet)
 }
 
 te_base_weight_length = text_encoder.get_input_embeddings().weight.data.shape[0]
 original_prepare_for_tokenization = tokenizer.prepare_for_tokenization
+current_model = base_model
 
 def setup_model(name, lora_state=None, lora_scale=1.0):
-    global pipe
+    global pipe, current_model
     
     keys = [k[0] for k in models]
-    if name not in unet_cache:
-        if name not in keys:
-            raise ValueError(name)
-        else:
-            
-            text_encoder = CLIPTextModel.from_pretrained(
-                models[keys.index(name)][1],
-                subfolder="text_encoder",
-                torch_dtype=torch.float16,
-            )
-            unet = UNet2DConditionModel.from_pretrained(
-                models[keys.index(name)][1],
-                subfolder="unet",
-                torch_dtype=torch.float16,
-            )
-            
-            if torch.cuda.is_available():
-                unet.to("cuda")
-                text_encoder.to("cuda")
-                
-            unet_cache[name] = unet
-            te_cache[name] = text_encoder
-            lora_cache[name] = LoRANetwork(text_encoder, unet)
+    model = models[keys.index(name)][1]
+    if model not in unet_cache:
+        unet = UNet2DConditionModel.from_pretrained(model, subfolder="unet", torch_dtype=torch.float16)
+        text_encoder = CLIPTextModel.from_pretrained(model, subfolder="text_encoder", torch_dtype=torch.float16)
+        
+        unet_cache[model] = unet
+        te_cache[model] = text_encoder
+        lora_cache[model] = LoRANetwork(text_encoder, unet)
 
-    local_te, local_unet, local_lora, = te_cache[name], unet_cache[name], lora_cache[name]
+    if current_model != model:
+        # offload current model
+        unet_cache[current_model].to("cpu")
+        te_cache[current_model].to("cpu")
+        lora_cache[current_model].to("cpu")
+        current_model = model
+        
+    local_te, local_unet, local_lora, = te_cache[model], unet_cache[model], lora_cache[model]
     local_unet.set_attn_processor(CrossAttnProcessor())
     local_lora.reset()
     clip_skip = models[keys.index(name)][2]
+    
+    if torch.cuda.is_available():
+        local_unet.to("cuda")
+        local_te.to("cuda")
     
     if lora_state is not None and lora_state != "":
         local_lora.load(lora_state, lora_scale)
         local_lora.to(local_unet.device, dtype=local_unet.dtype)
     
+    pipe.text_encoder, pipe.unet = local_te, local_unet
     pipe.setup_unet(local_unet)
     pipe.tokenizer.prepare_for_tokenization = original_prepare_for_tokenization
     pipe.tokenizer.added_tokens_encoder = {}
