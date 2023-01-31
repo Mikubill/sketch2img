@@ -4,7 +4,7 @@
 
 ![intro](https://sketch-guided-diffusion.github.io/files/scheme_inference.jpg)
 
-Sketch-Guided Text-to-Image is a method preposeed by researchers in Google Research to guide the inference process of a pretrained text-to-image diffusion model with an edge predictor that operates on the internal activations of the core network of the diffusion model, encouraging the edge of the synthesized image to follow a reference sketch.
+Sketch-Guided Text-to-Image is a method proposed by researchers in Google Research to guide the inference process of a pretrained text-to-image diffusion model with an edge predictor that operates on the internal activations of the core network of the diffusion model, encouraging the edge of the synthesized image to follow a reference sketch.
 
 Note: Paint-With-Words already moved to https://github.com/Mikubill/sd-paint-with-words
 
