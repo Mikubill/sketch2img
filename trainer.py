@@ -36,7 +36,7 @@ def parse_args():
 def generate_sketch(sketch_generator, img, fixed=512, method=torchvision.transforms.InterpolationMode.BICUBIC):
     org_size = (img.shape[-2], img.shape[-1])
     transformed = torchvision.transforms.Resize((fixed, fixed), method)(img)
-    tiled = torch.tile(sketch_generator(transformed), (3, 1, 1))
+    tiled = torch.tile(1-sketch_generator(transformed), (3, 1, 1))
     resized = torchvision.transforms.Resize(org_size, method)(tiled)
     return resized
 

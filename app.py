@@ -69,6 +69,18 @@ lgp.load_state_dict(torch.load("/root/workspace/sketch2img/edge_predictor.pt"))
 lgp.to(unet.device, dtype=unet.dtype)
 pipe.setup_lgp(lgp)
 
+# import numpy as np
+
+# def decode_latents(latents):
+#     latents = 1 / 0.18215 * latents
+#     image = vae.decode(latents).sample
+#     image = (image / 2 + 0.5).clamp(0, 1)
+#         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+#     image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+#     image = image.squeeze(0) * 255
+    
+#     return image.astype(np.uint8)
+
 def inference(
     prompt,
     guidance,
@@ -92,10 +104,11 @@ def inference(
 
     sketchs=None
     if spimg is not None:
-        print(spimg)
         gsimg = Image.fromarray(spimg)
         tensor_img = torch.tile(transforms(gsimg), (3, 1, 1)).unsqueeze(0)
         sketchs = vae.encode(tensor_img.to(vae.device, dtype=vae.dtype)).latent_dist.sample() * 0.18215
+        # opx = Image.fromarray(decode_latents(sketchs))
+        # opx.save("output_encoded.png")
 
     result = pipe(
         prompt,
