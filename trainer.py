@@ -6,6 +6,7 @@ import os
 import tempfile
 
 import bitsandbytes as bnb
+from einops import rearrange
 import torch
 import torchtext
 import torchvision
@@ -13,18 +14,20 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from anime2sketch.model import create_model
 from modules.dataset import ImageStore
-from modules.model_clip import SatMixin
+from modules.latent_predictor import LatentEdgePredictor, hook_unet
 from omegaconf import OmegaConf
 from tqdm import tqdm
-from transformers import CLIPTokenizer, CLIPVisionModel, CLIPImageProcessor
+from transformers import CLIPTokenizer
 
 import diffusers
 from diffusers import DDIMScheduler, StableDiffusionPipeline
 
+# ref: https://github.com/ogkalu2/Sketch-Guided-Stable-Diffusion/blob/main/train_LGP.py
+# ref: https://sketch-guided-diffusion.github.io
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--config", type=str, default="/root/workspace/sketch2img/train.yaml")
     parser.add_argument("--network_weights", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
@@ -82,7 +85,7 @@ def train():
         **config.dataset
     )
     
-    ddp_scaler = DistributedDataParallelKwargs(bucket_cap_mb=15, find_unused_parameters=True)
+    ddp_scaler = DistributedDataParallelKwargs(bucket_cap_mb=15, find_unused_parameters=False)
     metrics = []
     if config.monitor.wandb_id != "" and get_local_rank() in [0, -1]:
         import wandb
@@ -90,6 +93,7 @@ def train():
         metrics.append("wandb")
         
     accelerator = Accelerator(mixed_precision="fp16", kwargs_handlers=[ddp_scaler], log_with=metrics,)
+    # accelerator = Accelerator(mixed_precision="fp16", log_with=metrics,)
 
     # モデルを読み込む
     pipe = StableDiffusionPipeline.from_pretrained(config.model_path, tokenizer=None, safety_checker=None)
@@ -100,21 +104,16 @@ def train():
     unet.enable_xformers_memory_efficient_attention()
 
     # prepare network
-    sat_model = SatMixin(unet)
-    sketch_processor = CLIPImageProcessor()
-    sketch_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-large-patch14")
+    feature_blocks = hook_unet(unet)
+    edge_predictor = LatentEdgePredictor(9320, 4, 9)
         
     # generator
     torchtext.utils.download_from_url("https://huggingface.co/datasets/nyanko7/tmp-public/resolve/main/netG.pth", root="./weights/")
     sketch_generator =  create_model()
     sketch_generator.eval()
 
-    # if args.network_weights is not None:
-    #     print("load network weights from:", args.network_weights)
-    #     network.load_weights(args.network_weights)
-
     optimizer = bnb.optim.AdamW8bit(
-        itertools.chain.from_iterable([sat_model.parameters(), sketch_encoder.parameters()]),
+        edge_predictor.parameters(),
         **config.optimizer.params
     )
 
@@ -133,31 +132,29 @@ def train():
     
     # lr schedulerを用意する
     lr_scheduler = diffusers.optimization.get_scheduler(
-        "cosine_with_restarts",
+        "constant_with_warmup",
         optimizer,
         num_warmup_steps=150,
         num_training_steps=max_train_steps,
     )
 
-    unet, sketch_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, sketch_encoder, optimizer, train_dataloader, lr_scheduler
+    unet, edge_predictor, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, edge_predictor, optimizer, train_dataloader, lr_scheduler
     )
-    
+
+
     unet.to(accelerator.device, dtype=torch.float16)
     text_encoder.to(accelerator.device, dtype=torch.float16)
     vae.to(accelerator.device, dtype=torch.float32)
     sketch_generator.to(accelerator.device, dtype=torch.float32)
-    sat_model.to(accelerator.device, dtype=torch.float32)
+    edge_predictor.to(accelerator.device, dtype=torch.float32)
     
     unet.eval()
     vae.eval()
     text_encoder.eval()
-    
-    sat_model.requires_grad_(True)
-    sketch_encoder.requires_grad_(True)
-    unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    
+    unet.requires_grad_(False)
+    edge_predictor.requires_grad_(True)
     
     if config.monitor.huggingface_repo and get_local_rank() in [0, -1]:
         from huggingface_hub import Repository
@@ -195,24 +192,29 @@ def train():
 
     if accelerator.is_main_process:
         accelerator.init_trackers("network_train")
+        
+    def get_noise_level(noise, noise_scheduler, timesteps):
+        sqrt_one_minus_alpha_prod = (1 - noise_scheduler.alphas_cumprod[timesteps]) ** 0.5
+        sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+        while len(sqrt_one_minus_alpha_prod.shape) < len(noise.shape):
+            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
+            
+        noise_level = sqrt_one_minus_alpha_prod * noise
+        return noise_level
 
     for epoch in range(num_train_epochs):
-        print(f"epoch {epoch+1}/{num_train_epochs}")
+        progress_bar.set_description_str(f"Epoch {epoch+1}/{num_train_epochs}")
 
         loss_total = 0
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate([sat_model, sketch_encoder]):
+            with accelerator.accumulate(edge_predictor):
                 
                 input_ids, px = batch[0], batch[1]
                 with torch.no_grad():
                     input_ids = input_ids.to(accelerator.device)
                     encoder_hidden_states = encode_tokens(tokenizer, text_encoder, input_ids)
                     latents = vae.encode(px).latent_dist.sample() * 0.18215
-                    raw_sketch = generate_sketch(sketch_generator, px)
-                    inputs = sketch_processor(images=[img for img in raw_sketch], return_tensors="pt", padding=True).pixel_values
-                    
-                sketchs = sketch_encoder(inputs.to(accelerator.device), output_hidden_states=True).last_hidden_state   
-                sat_model.set_state(sketchs)
+                    sketchs = vae.encode(generate_sketch(sketch_generator, px)).latent_dist.sample() * 0.18215
 
                 # Sample noise that we'll add to the latents 
                 noise = torch.randn_like(latents, device=latents.device)
@@ -224,11 +226,22 @@ def train():
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                
+                noise_level = get_noise_level(noise, noise_scheduler, timesteps)
 
                 # Predict the noise residual
-                noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")  
+                unet(noisy_latents, timesteps, encoder_hidden_states)
+                
+                intermidiate_result = []
+                for block in feature_blocks:
+                    resized = torch.nn.functional.interpolate(block.output, size=latents.shape[2], mode="bilinear") 
+                    intermidiate_result.append(resized)
+                    # free vram
+                    del block.output
+                    
+                intermidiate_result = torch.cat(intermidiate_result, dim=1)
+                result = edge_predictor(intermidiate_result, noise_level)
+                result = rearrange(result, "(b w h) c -> b c h w", b=bsz, h=sketchs.shape[2], w=sketchs.shape[3])
+                loss = torch.nn.functional.mse_loss(result, sketchs, reduction="mean")
 
                 accelerator.backward(loss)
                 optimizer.step()
@@ -254,14 +267,13 @@ def train():
 
         accelerator.wait_for_everyone()
         
-    if accelerator.is_main_process:
-        ctx = contextlib.nullcontext()
-        if config.monitor.huggingface_repo and accelerator.is_main_process:
-            ctx = repo.commit(f"add/update model: epoch {epoch}", blocking=False, auto_lfs_prune=True)
-            
-        with ctx:
-            accelerator.save(accelerator.unwrap_model(sketch_encoder).state_dict(), "sketch_encoder_model.pt")
-            accelerator.save(accelerator.unwrap_model(sat_model).state_dict(), "sketch_attn_model.pt")
+        if accelerator.is_main_process:
+            ctx = contextlib.nullcontext()
+            if config.monitor.huggingface_repo and accelerator.is_main_process:
+                ctx = repo.commit(f"add/update model: epoch {epoch}", blocking=False, auto_lfs_prune=True)
+                
+            with ctx:
+                accelerator.save(accelerator.unwrap_model(edge_predictor).state_dict(), "sketch_encoder_model.pt")
 
         # end of epoch
     accelerator.end_training()

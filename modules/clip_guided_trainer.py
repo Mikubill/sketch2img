@@ -13,11 +13,10 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from anime2sketch.model import create_model
 from modules.dataset import ImageStore
-from modules.model_unet import SatMixin
-from modules.unet import SketchEncoder
+from sketch2img.modules.clip_guided_attn import SatMixin
 from omegaconf import OmegaConf
 from tqdm import tqdm
-from transformers import CLIPTokenizer
+from transformers import CLIPTokenizer, CLIPVisionModel, CLIPImageProcessor
 
 import diffusers
 from diffusers import DDIMScheduler, StableDiffusionPipeline
@@ -102,8 +101,8 @@ def train():
 
     # prepare network
     sat_model = SatMixin(unet)
-    sketch_encoder = SketchEncoder.from_config(".")
-    sketch_encoder.enable_xformers_memory_efficient_attention()
+    sketch_processor = CLIPImageProcessor()
+    sketch_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-large-patch14")
         
     # generator
     torchtext.utils.download_from_url("https://huggingface.co/datasets/nyanko7/tmp-public/resolve/main/netG.pth", root="./weights/")
@@ -114,9 +113,8 @@ def train():
     #     print("load network weights from:", args.network_weights)
     #     network.load_weights(args.network_weights)
 
-    params_to_optim = itertools.chain.from_iterable([sat_model.parameters(), sketch_encoder.parameters()])
     optimizer = bnb.optim.AdamW8bit(
-        params_to_optim,
+        itertools.chain.from_iterable([sat_model.parameters(), sketch_encoder.parameters()]),
         **config.optimizer.params
     )
 
@@ -135,7 +133,7 @@ def train():
     
     # lr schedulerを用意する
     lr_scheduler = diffusers.optimization.get_scheduler(
-        "constant_with_warmup",
+        "cosine_with_restarts",
         optimizer,
         num_warmup_steps=150,
         num_training_steps=max_train_steps,
@@ -144,8 +142,7 @@ def train():
     unet, sketch_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         unet, sketch_encoder, optimizer, train_dataloader, lr_scheduler
     )
-
-
+    
     unet.to(accelerator.device, dtype=torch.float16)
     text_encoder.to(accelerator.device, dtype=torch.float16)
     vae.to(accelerator.device, dtype=torch.float32)
@@ -155,10 +152,12 @@ def train():
     unet.eval()
     vae.eval()
     text_encoder.eval()
-    text_encoder.requires_grad_(False)
-    unet.requires_grad_(False)
+    
     sat_model.requires_grad_(True)
     sketch_encoder.requires_grad_(True)
+    unet.requires_grad_(False)
+    text_encoder.requires_grad_(False)
+    
     
     if config.monitor.huggingface_repo and get_local_rank() in [0, -1]:
         from huggingface_hub import Repository
@@ -209,7 +208,11 @@ def train():
                     input_ids = input_ids.to(accelerator.device)
                     encoder_hidden_states = encode_tokens(tokenizer, text_encoder, input_ids)
                     latents = vae.encode(px).latent_dist.sample() * 0.18215
-                    sketchs = vae.encode(generate_sketch(sketch_generator, px)).latent_dist.sample() * 0.18215
+                    raw_sketch = generate_sketch(sketch_generator, px)
+                    inputs = sketch_processor(images=[img for img in raw_sketch], return_tensors="pt", padding=True).pixel_values
+                    
+                sketchs = sketch_encoder(inputs.to(accelerator.device), output_hidden_states=True).last_hidden_state   
+                sat_model.set_state(sketchs)
 
                 # Sample noise that we'll add to the latents 
                 noise = torch.randn_like(latents, device=latents.device)
@@ -222,18 +225,12 @@ def train():
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 
-                # Fixed timestep to avoid multiply forward pass during inference.
-                sketch_hidden_state = sketch_encoder(sketchs, 0, None).sample
-                sat_model.set_res_samples(sketch_hidden_state)
 
                 # Predict the noise residual
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
                 loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")  
 
                 accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_optim, 1.0)
-                    
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)

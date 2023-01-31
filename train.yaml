@@ -1,7 +1,7 @@
 name: test-run
-model_path: "/root/workspace/storage/models/orangemix"
-train_epochs: 30
-batch_size: 3
+model_path: "/root/workspace/animesfw"
+train_epochs: 5
+batch_size: 4
 resolution: 512
 seed: 1138
 
@@ -17,9 +17,9 @@ arb:
 
 dataset:
   img_path: 
-    - "/root/workspace/nahida"
+    - "/root/workspace/storage/datasets/pixiv_top50_fin"
   center_crop: false
-  ucg: 0.1
+  ucg: 0.0
   debug_arb: false
   num_workers: 3
   process_tags: true

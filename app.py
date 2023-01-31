@@ -4,12 +4,11 @@ import gradio as gr
 import torch
 
 from gradio import inputs
-from modules.model_unet import SatMixin
 from PIL import Image
 from torchvision import transforms
 from diffusers import AutoencoderKL, DPMSolverMultistepScheduler
-from diffusers import StableDiffusionPipeline
-from modules.unet import SketchEncoder
+from modules.latent_predictor import LatentEdgePredictor
+from modules.pipeline import AntiGradientPipeline
 
 start_time = time.time()
 scheduler = DPMSolverMultistepScheduler(
@@ -30,7 +29,7 @@ last_mode = "txt2img"
 vae = AutoencoderKL.from_pretrained(
     "runwayml/stable-diffusion-v1-5", subfolder="vae", torch_dtype=torch.float16
 )
-pipe_t2i = StableDiffusionPipeline.from_pretrained(
+pipe_t2i = AntiGradientPipeline.from_pretrained(
     "/root/workspace/storage/models/orangemix",
     vae=vae,
     torch_dtype=torch.float16,
@@ -41,17 +40,7 @@ pipe = pipe_t2i
 
 # inject
 unet = pipe.unet
-
-sat_model = SatMixin(unet)
-sat_model.load_state_dict(torch.load("/root/workspace/sketch2img/sketch_attn_model.pt"))
-
-sketch_encoder = SketchEncoder.from_config(".")
-sketch_encoder.load_state_dict(torch.load("/root/workspace/sketch2img/sketch_encoder_model.pt"))
-sketch_encoder.enable_xformers_memory_efficient_attention()
 unet.enable_xformers_memory_efficient_attention()
-
-sketch_encoder.to(torch.device("cuda"), dtype=unet.dtype)
-sat_model.to(torch.device("cuda"), dtype=unet.dtype)
 
 if torch.cuda.is_available():
     pipe = pipe.to("cuda")
@@ -75,6 +64,10 @@ transforms = transforms.Compose(
     ]
 )
 
+lgp =  LatentEdgePredictor(9320, 4, 9)
+lgp.load_state_dict(torch.load("/root/workspace/sketch2img/edge_predictor.pt"))
+lgp.to(unet.device, dtype=unet.dtype)
+pipe.setup_lgp(lgp)
 
 def inference(
     prompt,
@@ -88,8 +81,7 @@ def inference(
     spimg=None,
 ):
     global current_model
-    generator = torch.Generator("cuda").manual_seed(
-        seed) if seed != 0 else None
+    generator = torch.Generator("cuda").manual_seed(seed) if seed != 0 else None
 
     global last_mode
     global pipe
@@ -98,19 +90,12 @@ def inference(
     global sketch_encoder
     global sat_model
 
+    sketchs=None
     if spimg is not None:
         print(spimg)
         gsimg = Image.fromarray(spimg)
         tensor_img = torch.tile(transforms(gsimg), (3, 1, 1)).unsqueeze(0)
-        stacked_img = (
-            torch.stack([torch.zeros_like(tensor_img), tensor_img])
-            .squeeze(1)
-            .to(torch.device("cuda"), dtype=vae.dtype)
-        )  # for uncond
-        sketchs = vae.encode(stacked_img).latent_dist.sample() * 0.18215
-        sketch_hidden_state = sketch_encoder(sketchs, 0, None).sample
-        sat_model.set_res_samples(sketch_hidden_state)
-        sat_model.set_scale(strength)
+        sketchs = vae.encode(tensor_img.to(vae.device, dtype=vae.dtype)).latent_dist.sample() * 0.18215
 
     result = pipe(
         prompt,
@@ -120,9 +105,9 @@ def inference(
         width=width,
         height=height,
         generator=generator,
+        sketch_image=sketchs,
     )
     return result[0][0], None
-
 
 css = """.finetuned-diffusion-div div{display:inline-flex;align-items:center;gap:.8rem;font-size:1.75rem}.finetuned-diffusion-div div h1{font-weight:900;margin-bottom:7px}.finetuned-diffusion-div p{margin-bottom:10px;font-size:94%}a{text-decoration:underline}.tabs{margin-top:0;margin-bottom:0}#gallery{min-height:20rem}
 """

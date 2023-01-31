@@ -4,7 +4,7 @@ import gradio as gr
 import torch
 
 from gradio import inputs
-from modules.model_clip import SatMixin
+from sketch2img.modules.clip_guided_attn import SatMixin
 from PIL import Image
 from torchvision import transforms
 from diffusers import AutoencoderKL, DPMSolverMultistepScheduler
