@@ -231,15 +231,15 @@ def train():
                 # Predict the noise residual
                 unet(noisy_latents, timesteps, encoder_hidden_states)
                 
-                intermidiate_result = []
+                intermediate_result = []
                 for block in feature_blocks:
                     resized = torch.nn.functional.interpolate(block.output, size=latents.shape[2], mode="bilinear") 
                     intermidiate_result.append(resized)
                     # free vram
                     del block.output
                     
-                intermidiate_result = torch.cat(intermidiate_result, dim=1)
-                result = edge_predictor(intermidiate_result, noise_level)
+                intermidiate_result = torch.cat(intermediate_result, dim=1)
+                result = edge_predictor(intermediate_result, noise_level)
                 result = rearrange(result, "(b w h) c -> b c h w", b=bsz, h=sketchs.shape[2], w=sketchs.shape[3])
                 loss = torch.nn.functional.mse_loss(result, sketchs, reduction="mean")
 

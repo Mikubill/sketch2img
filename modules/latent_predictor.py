@@ -52,13 +52,13 @@ def hook_unet(unet: UNet2DConditionModel):
             output = output[0]
         
         if isinstance(output, torch.TensorType):
-            feature = output.detach().float()
+            feature = output.float()
             setattr(module, "output", feature)
         elif isinstance(output, dict): 
-            feature = output.sample.detach().float()
+            feature = output.sample.float()
             setattr(module, "output", feature)
         else: 
-            feature = output.detach().float()
+            feature = output.float()
             setattr(module, "output", feature)
     
     # 0, 1, 2 -> (ldm-down) 2, 4, 8
