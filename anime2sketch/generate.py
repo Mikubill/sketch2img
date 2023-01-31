@@ -6,8 +6,9 @@ import torch
 
 def pic2sketch(model, img, load_size=768):
     img, aus_resize = read_img_path(img, load_size)
-    aus_tensor = model(img)
-    print(aus_tensor.data.shape, aus_resize)
+    aus_tensor = 1 - model(img)
+    aus_tensor[aus_tensor<0.5] = 0
+    aus_tensor[aus_tensor>=0.5] = 1
     aus_img = tensor_to_img(aus_tensor)
     image_pil = Image.fromarray(aus_img)
     image_pil = image_pil.resize(aus_resize, Image.LANCZOS)
