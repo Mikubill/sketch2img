@@ -19,5 +19,5 @@ if __name__ == "__main__":
     torchtext.utils.download_from_url("https://huggingface.co/datasets/nyanko7/tmp-public/resolve/main/netG.pth", root="./weights/")
     model = create_model()
     model.eval()
-    img = pic2sketch(model, 'building.jpg', 1024)
+    img = pic2sketch(model, 'building.jpg', 512)
     img.save("output.png")

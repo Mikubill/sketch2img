@@ -33,7 +33,7 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def generate_sketch(sketch_generator, img, fixed=512, method=torchvision.transforms.InterpolationMode.BICUBIC):
+def generate_sketch(sketch_generator, img, fixed=1024, method=torchvision.transforms.InterpolationMode.BICUBIC):
     org_size = (img.shape[-2], img.shape[-1])
     transformed = torchvision.transforms.Resize((fixed, fixed), method)(img)
     val = 1-sketch_generator(transformed)

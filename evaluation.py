@@ -65,8 +65,9 @@ def decode_latents(latents):
     latents = 1 / 0.18215 * latents
     image = vae.decode(latents).sample
     image = (image / 2 + 0.5).clamp(0, 1)
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+    # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
     image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+    image[image<0.5] = 0
     image = image.squeeze(0) * 255
     
     return image.astype(np.uint8)
